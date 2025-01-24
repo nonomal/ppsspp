@@ -33,7 +33,7 @@
     <ClInclude Include="GPUState.h">
       <Filter>Common</Filter>
     </ClInclude>
-    <ClInclude Include="GPUInterface.h">
+    <ClInclude Include="GPUDefinitions.h">
       <Filter>Common</Filter>
     </ClInclude>
     <ClInclude Include="GPUCommon.h">
@@ -264,6 +264,24 @@
     <ClInclude Include="Common\GeometryShaderGenerator.h">
       <Filter>Common</Filter>
     </ClInclude>
+    <ClInclude Include="GPUCommonHW.h">
+      <Filter>Common</Filter>
+    </ClInclude>
+    <ClInclude Include="Common\ReplacedTexture.h">
+      <Filter>Common</Filter>
+    </ClInclude>
+    <ClInclude Include="Common\TextureReplacer.h">
+      <Filter>Common</Filter>
+    </ClInclude>
+    <ClInclude Include="Common\VertexDecoderHandwritten.h">
+      <Filter>Common</Filter>
+    </ClInclude>
+    <ClInclude Include="Debugger\State.h">
+      <Filter>Debugger</Filter>
+    </ClInclude>
+    <ClInclude Include="Common\DepthRaster.h">
+      <Filter>Common</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Math3D.cpp">
@@ -461,9 +479,6 @@
     <ClCompile Include="Debugger\Debugger.cpp">
       <Filter>Debugger</Filter>
     </ClCompile>
-    <ClCompile Include="GLES\DepthBufferGLES.cpp">
-      <Filter>GLES</Filter>
-    </ClCompile>
     <ClCompile Include="Debugger\Playback.cpp">
       <Filter>Debugger</Filter>
     </ClCompile>
@@ -518,6 +533,33 @@
     <ClCompile Include="Common\GeometryShaderGenerator.cpp">
       <Filter>Common</Filter>
     </ClCompile>
+    <ClCompile Include="Common\DepthBufferCommon.cpp">
+      <Filter>Common</Filter>
+    </ClCompile>
+    <ClCompile Include="GLES\StencilBufferGLES.cpp">
+      <Filter>GLES</Filter>
+    </ClCompile>
+    <ClCompile Include="Common\VertexDecoderRiscV.cpp">
+      <Filter>Common</Filter>
+    </ClCompile>
+    <ClCompile Include="GPUCommonHW.cpp">
+      <Filter>Common</Filter>
+    </ClCompile>
+    <ClCompile Include="Common\ReplacedTexture.cpp">
+      <Filter>Common</Filter>
+    </ClCompile>
+    <ClCompile Include="Common\TextureReplacer.cpp">
+      <Filter>Common</Filter>
+    </ClCompile>
+    <ClCompile Include="Common\VertexDecoderHandwritten.cpp">
+      <Filter>Common</Filter>
+    </ClCompile>
+    <ClCompile Include="Debugger\State.cpp">
+      <Filter>Debugger</Filter>
+    </ClCompile>
+    <ClCompile Include="Common\DepthRaster.cpp">
+      <Filter>Common</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <FxCompile Include="..\assets\shaders\tex_4xbrz.csh">
@@ -532,6 +574,12 @@
   </ItemGroup>
   <ItemGroup>
     <None Include="..\assets\shaders\defaultshaders.ini">
+      <Filter>Shaders</Filter>
+    </None>
+    <None Include="..\assets\shaders\stereo_red_blue.fsh">
+      <Filter>Shaders</Filter>
+    </None>
+    <None Include="..\assets\shaders\stereo_sbs.fsh">
       <Filter>Shaders</Filter>
     </None>
   </ItemGroup>

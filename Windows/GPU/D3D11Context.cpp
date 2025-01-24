@@ -11,18 +11,12 @@
 
 #include "Core/Config.h"
 #include "Core/ConfigValues.h"
-#include "Core/Reporting.h"
 #include "Core/System.h"
 #include "Windows/GPU/D3D11Context.h"
 #include "Windows/W32Util/Misc.h"
 #include "Common/GPU/thin3d.h"
 #include "Common/GPU/thin3d_create.h"
 #include "Common/GPU/D3D11/D3D11Loader.h"
-
-#ifdef __MINGW32__
-#undef __uuidof
-#define __uuidof(type) IID_##type
-#endif
 
 #ifndef DXGI_ERROR_NOT_FOUND
 #define _FACDXGI    0x87a
@@ -34,38 +28,16 @@
 #error This file should not be compiled for UWP.
 #endif
 
-D3D11Context::D3D11Context() : draw_(nullptr), adapterId(-1), hDC(nullptr), hWnd_(nullptr), hD3D11(nullptr) {
-}
-
-D3D11Context::~D3D11Context() {
-}
-
-void D3D11Context::SwapBuffers() {
-	swapChain_->Present(swapInterval_, 0);
-	draw_->HandleEvent(Draw::Event::PRESENTED, 0, 0, nullptr, nullptr);
-}
-
-void D3D11Context::SwapInterval(int interval) {
-	swapInterval_ = interval;
-}
-
 HRESULT D3D11Context::CreateTheDevice(IDXGIAdapter *adapter) {
 	bool windowed = true;
 	// D3D11 has no need for display rotation.
-	g_display_rotation = DisplayRotation::ROTATE_0;
-	g_display_rot_matrix.setIdentity();
+	g_display.rotation = DisplayRotation::ROTATE_0;
+	g_display.rot_matrix.setIdentity();
 #if defined(_DEBUG) && !PPSSPP_ARCH(ARM) && !PPSSPP_ARCH(ARM64)
 	UINT createDeviceFlags = D3D11_CREATE_DEVICE_DEBUG;
 #else
 	UINT createDeviceFlags = 0;
 #endif
-
-	static const D3D_DRIVER_TYPE driverTypes[] = {
-		D3D_DRIVER_TYPE_HARDWARE,
-		D3D_DRIVER_TYPE_WARP,
-		D3D_DRIVER_TYPE_REFERENCE,
-	};
-	const UINT numDriverTypes = ARRAYSIZE(driverTypes);
 
 	static const D3D_FEATURE_LEVEL featureLevels[] = {
 		D3D_FEATURE_LEVEL_12_1,
@@ -87,13 +59,6 @@ HRESULT D3D11Context::CreateTheDevice(IDXGIAdapter *adapter) {
 			D3D11_SDK_VERSION, &device_, &featureLevel_, &context_);
 	}
 	return hr;
-}
-
-static void GetRes(HWND hWnd, int &xres, int &yres) {
-	RECT rc;
-	GetClientRect(hWnd, &rc);
-	xres = rc.right - rc.left;
-	yres = rc.bottom - rc.top;
 }
 
 bool D3D11Context::Init(HINSTANCE hInst, HWND wnd, std::string *error_message) {
@@ -137,7 +102,7 @@ bool D3D11Context::Init(HINSTANCE hInst, HWND wnd, std::string *error_message) {
 
 	if (FAILED(hr)) {
 		const char *defaultError = "Your GPU does not appear to support Direct3D 11.\n\nWould you like to try again using Direct3D 9 instead?";
-		auto err = GetI18NCategory("Error");
+		auto err = GetI18NCategory(I18NCat::ERRORS);
 
 		std::wstring error;
 
@@ -179,19 +144,15 @@ bool D3D11Context::Init(HINSTANCE hInst, HWND wnd, std::string *error_message) {
 	}
 #endif
 
-	draw_ = Draw::T3DCreateD3D11Context(device_, context_, device1_, context1_, featureLevel_, hWnd_, adapterNames);
-	SetGPUBackend(GPUBackend::DIRECT3D11, chosenAdapterName);
-	bool success = draw_->CreatePresets();  // If we can run D3D11, there's a compiler installed. I think.
-	_assert_msg_(success, "Failed to compile preset shaders");
 
 	int width;
 	int height;
-	GetRes(hWnd_, width, height);
+	W32Util::GetWindowRes(hWnd_, &width, &height);
 
 	// Obtain DXGI factory from device (since we used nullptr for pAdapter above)
-	IDXGIFactory1* dxgiFactory = nullptr;
-	IDXGIDevice* dxgiDevice = nullptr;
-	IDXGIAdapter* adapter = nullptr;
+	IDXGIFactory1 *dxgiFactory = nullptr;
+	IDXGIDevice *dxgiDevice = nullptr;
+	IDXGIAdapter *adapter = nullptr;
 	hr = device_->QueryInterface(__uuidof(IDXGIDevice), reinterpret_cast<void**>(&dxgiDevice));
 	if (SUCCEEDED(hr)) {
 		hr = dxgiDevice->GetAdapter(&adapter);
@@ -222,6 +183,11 @@ bool D3D11Context::Init(HINSTANCE hInst, HWND wnd, std::string *error_message) {
 	hr = dxgiFactory->CreateSwapChain(device_, &sd, &swapChain_);
 	dxgiFactory->MakeWindowAssociation(hWnd_, DXGI_MWA_NO_ALT_ENTER);
 	dxgiFactory->Release();
+
+	draw_ = Draw::T3DCreateD3D11Context(device_, context_, device1_, context1_, swapChain_, featureLevel_, hWnd_, adapterNames, g_Config.iInflightFrames);
+	SetGPUBackend(GPUBackend::DIRECT3D11, chosenAdapterName);
+	bool success = draw_->CreatePresets();  // If we can run D3D11, there's a compiler installed. I think.
+	_assert_msg_(success, "Failed to compile preset shaders");
 
 	GotBackbuffer();
 	return true;
@@ -257,7 +223,7 @@ void D3D11Context::Resize() {
 	LostBackbuffer();
 	int width;
 	int height;
-	GetRes(hWnd_, width, height);
+	W32Util::GetWindowRes(hWnd_, &width, &height);
 	swapChain_->ResizeBuffers(0, width, height, DXGI_FORMAT_UNKNOWN, 0);
 	GotBackbuffer();
 }
@@ -290,7 +256,7 @@ void D3D11Context::Shutdown() {
 		d3dInfoQueue_->SetBreakOnSeverity(D3D11_MESSAGE_SEVERITY_WARNING, false);
 	}
 	if (d3dDebug_) {
-		d3dDebug_->ReportLiveDeviceObjects(D3D11_RLDO_SUMMARY | D3D11_RLDO_DETAIL);
+		d3dDebug_->ReportLiveDeviceObjects(D3D11_RLDO_FLAGS(D3D11_RLDO_SUMMARY | D3D11_RLDO_DETAIL));
 		d3dDebug_->Release();
 		d3dDebug_ = nullptr;
 	}

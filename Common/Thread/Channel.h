@@ -20,18 +20,17 @@ struct Mailbox {
 	std::mutex mutex_;
 	std::condition_variable condvar_;
 	T data_{};
+	bool dataReceived_ = false;
 
 	T Wait() {
 		std::unique_lock<std::mutex> lock(mutex_);
-		while (!data_) {
-			condvar_.wait(lock);
-		}
+		condvar_.wait(lock, [&] {return dataReceived_;});
 		return data_;
 	}
 
 	bool Poll(T *data) {
 		std::unique_lock<std::mutex> lock(mutex_);
-		if (data_) {
+		if (dataReceived_) {
 			*data = data_;
 			return true;
 		} else {
@@ -41,8 +40,9 @@ struct Mailbox {
 
 	bool Send(T data) {
 		std::unique_lock<std::mutex> lock(mutex_);
-		if (!data_) {
+		if (!dataReceived_) {
 			data_ = data;
+			dataReceived_ = true;
 			condvar_.notify_all();
 			return true;
 		} else {

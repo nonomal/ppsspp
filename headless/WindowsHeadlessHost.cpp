@@ -23,7 +23,7 @@
 #include "Common/GPU/OpenGL/GLCommon.h"
 #include "Common/GPU/OpenGL/GLFeatures.h"
 #include "Common/File/VFS/VFS.h"
-#include "Common/File/VFS/AssetReader.h"
+#include "Common/File/VFS/DirectoryReader.h"
 
 #include "Common/CommonWindows.h"
 #include "Common/Log.h"
@@ -66,23 +66,15 @@ HWND CreateHiddenWindow() {
 	return CreateWindowEx(0, L"PPSSPPHeadless", L"PPSSPPHeadless", style, CW_USEDEFAULT, CW_USEDEFAULT, WINDOW_WIDTH, WINDOW_HEIGHT, NULL, NULL, NULL, NULL);
 }
 
-void WindowsHeadlessHost::LoadNativeAssets()
-{
-	VFSRegister("", new DirectoryAssetReader(Path("assets")));
-	VFSRegister("", new DirectoryAssetReader(Path("")));
-	VFSRegister("", new DirectoryAssetReader(Path("..")));
-	VFSRegister("", new DirectoryAssetReader(Path("../Windows/assets")));
-	VFSRegister("", new DirectoryAssetReader(Path("../Windows")));
-}
-
-void WindowsHeadlessHost::SendDebugOutput(const std::string &output)
-{
-	fwrite(output.data(), sizeof(char), output.length(), stdout);
+void WindowsHeadlessHost::SendDebugOutput(const std::string &output) {
+	if (writeDebugOutput_)
+		fwrite(output.data(), sizeof(char), output.length(), stdout);
 	OutputDebugStringUTF8(output.c_str());
 }
 
-bool WindowsHeadlessHost::InitGraphics(std::string *error_message, GraphicsContext **ctx) {
+bool WindowsHeadlessHost::InitGraphics(std::string *error_message, GraphicsContext **ctx, GPUCore core) {
 	hWnd = CreateHiddenWindow();
+	gpuCore_ = core;
 
 	if (WINDOW_VISIBLE) {
 		ShowWindow(hWnd, TRUE);
@@ -125,7 +117,7 @@ bool WindowsHeadlessHost::InitGraphics(std::string *error_message, GraphicsConte
 	if (needRenderThread) {
 		std::thread th([&]{
 			while (threadState_ == RenderThreadState::IDLE)
-				sleep_ms(1);
+				sleep_ms(1, "render-thread-idle-poll");
 			threadState_ = RenderThreadState::STARTING;
 
 			std::string err;
@@ -140,7 +132,6 @@ bool WindowsHeadlessHost::InitGraphics(std::string *error_message, GraphicsConte
 				if (!gfx_->ThreadFrame()) {
 					break;
 				}
-				gfx_->SwapBuffers();
 			}
 
 			threadState_ = RenderThreadState::STOPPING;
@@ -151,12 +142,10 @@ bool WindowsHeadlessHost::InitGraphics(std::string *error_message, GraphicsConte
 		th.detach();
 	}
 
-	LoadNativeAssets();
-
 	if (needRenderThread) {
 		threadState_ = RenderThreadState::START_REQUESTED;
 		while (threadState_ == RenderThreadState::START_REQUESTED || threadState_ == RenderThreadState::STARTING)
-			sleep_ms(1);
+			sleep_ms(1, "render-thread-start-poll");
 
 		return threadState_ == RenderThreadState::STARTED;
 	}
@@ -167,7 +156,7 @@ bool WindowsHeadlessHost::InitGraphics(std::string *error_message, GraphicsConte
 void WindowsHeadlessHost::ShutdownGraphics() {
 	gfx_->StopThread();
 	while (threadState_ != RenderThreadState::STOPPED && threadState_ != RenderThreadState::IDLE)
-		sleep_ms(1);
+		sleep_ms(1, "render-thread-stop-poll");
 
 	gfx_->Shutdown();
 	delete gfx_;
@@ -183,5 +172,4 @@ void WindowsHeadlessHost::SwapBuffers() {
 		TranslateMessage(&msg);
 		DispatchMessage(&msg);
 	}
-	gfx_->SwapBuffers();
 }

@@ -20,16 +20,10 @@
 #include "Common/GPU/Vulkan/VulkanLoader.h"
 #include "Common/GPU/Vulkan/VulkanRenderManager.h"
 
-#include "Common/Data/Convert/SmallDataConvert.h"
-#include "GPU/Math3D.h"
 #include "GPU/GPUState.h"
 #include "GPU/ge_constants.h"
 #include "GPU/Common/GPUStateUtils.h"
-#include "Core/System.h"
 #include "Core/Config.h"
-#include "Core/Reporting.h"
-#include "GPU/Vulkan/GPU_Vulkan.h"
-#include "GPU/Vulkan/PipelineManagerVulkan.h"
 #include "GPU/Vulkan/FramebufferManagerVulkan.h"
 #include "GPU/Vulkan/ShaderManagerVulkan.h"
 #include "GPU/Vulkan/DrawEngineVulkan.h"
@@ -209,10 +203,11 @@ void DrawEngineVulkan::ConvertStateToVulkanKey(FramebufferManagerVulkan &fbManag
 			if ((gstate.pmskc & 0x00FFFFFF) == 0x00FFFFFF && g_Config.bVendorBugChecksEnabled && draw_->GetBugs().Has(Draw::Bugs::COLORWRITEMASK_BROKEN_WITH_DEPTHTEST)) {
 				key.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
 				if (!key.blendEnable) {
+					bool writeAlpha = maskState.channelMask & 8;
 					key.blendEnable = true;
 					key.blendOpAlpha = VK_BLEND_OP_ADD;
-					key.srcAlpha = VK_BLEND_FACTOR_ZERO;
-					key.destAlpha = VK_BLEND_FACTOR_ONE;
+					key.srcAlpha = writeAlpha ? VK_BLEND_FACTOR_ONE : VK_BLEND_FACTOR_ZERO;
+					key.destAlpha = writeAlpha ? VK_BLEND_FACTOR_ZERO : VK_BLEND_FACTOR_ONE;
 				}
 				key.blendOpColor = VK_BLEND_OP_ADD;
 				key.srcColor = VK_BLEND_FACTOR_ZERO;
@@ -274,10 +269,11 @@ void DrawEngineVulkan::ConvertStateToVulkanKey(FramebufferManagerVulkan &fbManag
 			}
 		} else {
 			// Depth Test
-			if (gstate.isDepthTestEnabled()) {
+			if (!IsDepthTestEffectivelyDisabled()) {
 				key.depthTestEnable = true;
 				key.depthCompareOp = compareOps[gstate.getDepthTestFunction()];
 				key.depthWriteEnable = gstate.isDepthWriteEnabled();
+				UpdateEverUsedEqualDepth(gstate.getDepthTestFunction());
 			} else {
 				key.depthTestEnable = false;
 				key.depthWriteEnable = false;
@@ -365,23 +361,20 @@ void DrawEngineVulkan::BindShaderBlendTex() {
 	// Set the nearest/linear here (since we correctly know if alpha/color tests are needed)?
 	if (!gstate.isModeClear()) {
 		if (fboTexBindState_ == FBO_TEX_COPY_BIND_TEX) {
-			bool bindResult = framebufferManager_->BindFramebufferAsColorTexture(1, framebufferManager_->GetCurrentRenderVFB(), BINDFBCOLOR_MAY_COPY);
+			VirtualFramebuffer *curRenderVfb = framebufferManager_->GetCurrentRenderVFB();
+			bool bindResult = framebufferManager_->BindFramebufferAsColorTexture(1, curRenderVfb, BINDFBCOLOR_MAY_COPY | BINDFBCOLOR_UNCACHED, Draw::ALL_LAYERS);
 			_dbg_assert_(bindResult);
 			boundSecondary_ = (VkImageView)draw_->GetNativeObject(Draw::NativeObject::BOUND_TEXTURE1_IMAGEVIEW);
-			boundSecondaryIsInputAttachment_ = false;
 			fboTexBound_ = true;
 			fboTexBindState_ = FBO_TEX_NONE;
 
 			// Must dirty blend state here so we re-copy next time.  Example: Lunar's spell effects.
 			dirtyRequiresRecheck_ |= DIRTY_BLEND_STATE;
-		} else if (fboTexBindState_ == FBO_TEX_READ_FRAMEBUFFER) {
-			draw_->BindCurrentFramebufferForColorInput();
-			boundSecondary_ = (VkImageView)draw_->GetNativeObject(Draw::NativeObject::BOUND_FRAMEBUFFER_COLOR_IMAGEVIEW);
-			boundSecondaryIsInputAttachment_ = true;
-			fboTexBindState_ = FBO_TEX_NONE;
 		} else {
 			boundSecondary_ = VK_NULL_HANDLE;
 		}
+	} else {
+		boundSecondary_ = VK_NULL_HANDLE;
 	}
 }
 

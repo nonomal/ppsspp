@@ -21,7 +21,6 @@
 
 #include "Core/System.h"
 #include "Core/Config.h"
-#include "Core/Reporting.h"
 
 #include "GPU/Math3D.h"
 #include "GPU/GPUState.h"
@@ -99,9 +98,9 @@ void DrawEngineDX9::ApplyDrawState(int prim) {
 	if (!gstate.isModeClear()) {
 		textureCache_->ApplyTexture();
 
-		if (fboTexBindState_ = FBO_TEX_COPY_BIND_TEX) {
+		if (fboTexBindState_ == FBO_TEX_COPY_BIND_TEX) {
 			// Note that this is positions, not UVs, that we need the copy from.
-			framebufferManager_->BindFramebufferAsColorTexture(1, framebufferManager_->GetCurrentRenderVFB(), BINDFBCOLOR_MAY_COPY);
+			framebufferManager_->BindFramebufferAsColorTexture(1, framebufferManager_->GetCurrentRenderVFB(), BINDFBCOLOR_MAY_COPY, 0);
 			// If we are rendering at a higher resolution, linear is probably best for the dest color.
 			device_->SetSamplerState(1, D3DSAMP_MAGFILTER, D3DTEXF_LINEAR);
 			device_->SetSamplerState(1, D3DSAMP_MINFILTER, D3DTEXF_LINEAR);
@@ -139,7 +138,7 @@ void DrawEngineDX9::ApplyDrawState(int prim) {
 
 				if (fboTexBindState_ == FBO_TEX_COPY_BIND_TEX) {
 					// Note that this is positions, not UVs, that we need the copy from.
-					framebufferManager_->BindFramebufferAsColorTexture(1, framebufferManager_->GetCurrentRenderVFB(), BINDFBCOLOR_MAY_COPY);
+					framebufferManager_->BindFramebufferAsColorTexture(1, framebufferManager_->GetCurrentRenderVFB(), BINDFBCOLOR_MAY_COPY | BINDFBCOLOR_UNCACHED, Draw::ALL_LAYERS);
 					// If we are rendering at a higher resolution, linear is probably best for the dest color.
 					device_->SetSamplerState(1, D3DSAMP_MAGFILTER, D3DTEXF_LINEAR);
 					device_->SetSamplerState(1, D3DSAMP_MINFILTER, D3DTEXF_LINEAR);
@@ -201,6 +200,12 @@ void DrawEngineDX9::ApplyDrawState(int prim) {
 		} else {
 			dxstate.shadeMode.set(gstate.getShadeMode() == GE_SHADE_GOURAUD ? D3DSHADE_GOURAUD : D3DSHADE_FLAT);
 		}
+
+		// We use fixed-function user clipping on D3D9, where available, for negative Z clipping.
+		if (draw_->GetDeviceCaps().clipPlanesSupported >= 1) {
+			bool wantClip = !gstate.isModeThrough() && gstate_c.submitType == SubmitType::DRAW;
+			dxstate.clipPlaneEnable.set(wantClip ? 1 : 0);
+		}
 	}
 
 	if (gstate_c.IsDirty(DIRTY_DEPTHSTENCIL_STATE)) {
@@ -228,10 +233,11 @@ void DrawEngineDX9::ApplyDrawState(int prim) {
 			}
 		} else {
 			// Depth Test
-			if (gstate.isDepthTestEnabled()) {
+			if (!IsDepthTestEffectivelyDisabled()) {
 				dxstate.depthTest.enable();
 				dxstate.depthFunc.set(ztests[gstate.getDepthTestFunction()]);
 				dxstate.depthWrite.set(gstate.isDepthWriteEnabled());
+				UpdateEverUsedEqualDepth(gstate.getDepthTestFunction());
 			} else {
 				dxstate.depthTest.disable();
 			}

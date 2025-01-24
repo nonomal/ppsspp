@@ -17,17 +17,19 @@
 
 #include <thread>
 
-#include "Common/Data/Encoding/Utf8.h"
+#include "Core/Core.h"
 #include "Common/Thread/ThreadUtil.h"
+#include "Common/System/Request.h"
 
+#include "Common/File/AndroidContentURI.h"
 #include "Common/File/FileUtil.h"
 #include "Common/StringUtils.h"
 #ifdef _WIN32
 #include "Common/CommonWindows.h"
 #endif
 
-#include "Core/ELF/ElfReader.h"
 #include "Core/ELF/ParamSFO.h"
+#include "Core/ELF/PBPReader.h"
 
 #include "Core/FileSystems/BlockDevices.h"
 #include "Core/FileSystems/BlobFileSystem.h"
@@ -40,23 +42,14 @@
 #include "Core/MemMap.h"
 #include "Core/HDRemaster.h"
 
-#include "Core/MIPS/MIPS.h"
-#include "Core/MIPS/MIPSAnalyst.h"
-#include "Core/MIPS/MIPSCodeUtils.h"
-
-#include "Host.h"
 
 #include "Core/Config.h"
 #include "Core/ConfigValues.h"
 #include "Core/System.h"
 #include "Core/PSPLoaders.h"
-#include "Core/HLE/HLE.h"
-#include "Core/HLE/sceKernel.h"
-#include "Core/HLE/sceKernelThread.h"
 #include "Core/HLE/sceKernelModule.h"
-#include "Core/HLE/sceKernelMemory.h"
 
-static std::thread loadingThread;
+static std::thread g_loadingThread;
 
 static void UseLargeMem(int memsize) {
 	if (memsize != 1) {
@@ -65,10 +58,10 @@ static void UseLargeMem(int memsize) {
 	}
 
 	if (Memory::g_PSPModel != PSP_MODEL_FAT) {
-		INFO_LOG(LOADER, "Game requested full PSP-2000 memory access");
+		INFO_LOG(Log::Loader, "Game requested full PSP-2000 memory access");
 		Memory::g_MemorySize = Memory::RAM_DOUBLE_SIZE;
 	} else {
-		WARN_LOG(LOADER, "Game requested full PSP-2000 memory access, ignoring in PSP-1000 mode");
+		WARN_LOG(Log::Loader, "Game requested full PSP-2000 memory access, ignoring in PSP-1000 mode");
 	}
 }
 
@@ -84,7 +77,7 @@ void InitMemoryForGameISO(FileLoader *fileLoader) {
 	std::shared_ptr<IFileSystem> blockSystem;
 
 	if (fileLoader->IsDirectory()) {
-		fileSystem = std::shared_ptr<IFileSystem>(new VirtualDiscFileSystem(&pspFileSystem, fileLoader->GetPath()));
+		fileSystem = std::make_shared<VirtualDiscFileSystem>(&pspFileSystem, fileLoader->GetPath());
 		blockSystem = fileSystem;
 	} else {
 		auto bd = constructBlockDevice(fileLoader);
@@ -92,9 +85,8 @@ void InitMemoryForGameISO(FileLoader *fileLoader) {
 		if (!bd)
 			return;
 
-		std::shared_ptr<IFileSystem> iso = std::shared_ptr<IFileSystem>(new ISOFileSystem(&pspFileSystem, bd));
-		fileSystem = iso;
-		blockSystem = std::shared_ptr<IFileSystem>(new ISOBlockSystem(iso));
+		fileSystem = std::make_shared<ISOFileSystem>(&pspFileSystem, bd);
+		blockSystem = std::make_shared<ISOBlockSystem>(fileSystem);
 	}
 
 	pspFileSystem.Mount("umd0:", blockSystem);
@@ -139,7 +131,7 @@ void InitMemoryForGameISO(FileLoader *fileLoader) {
 		break;
 	}
 	if (g_RemasterMode) {
-		INFO_LOG(LOADER, "HDRemaster found, using increased memory");
+		INFO_LOG(Log::Loader, "HDRemaster found, using increased memory");
 	}
 }
 
@@ -152,16 +144,16 @@ bool ReInitMemoryForGameISO(FileLoader *fileLoader) {
 	std::shared_ptr<IFileSystem> blockSystem;
 
 	if (fileLoader->IsDirectory()) {
-		fileSystem = std::shared_ptr<IFileSystem>(new VirtualDiscFileSystem(&pspFileSystem, fileLoader->GetPath()));
+		fileSystem = std::make_shared<VirtualDiscFileSystem>(&pspFileSystem, fileLoader->GetPath());
 		blockSystem = fileSystem;
 	} else {
 		auto bd = constructBlockDevice(fileLoader);
 		if (!bd)
 			return false;
 
-		std::shared_ptr<IFileSystem> iso = std::shared_ptr<IFileSystem>(new ISOFileSystem(&pspFileSystem, bd));
+		auto iso = std::make_shared<ISOFileSystem>(&pspFileSystem, bd);
 		fileSystem = iso;
-		blockSystem = std::shared_ptr<IFileSystem>(new ISOBlockSystem(iso));
+		blockSystem = std::make_shared<ISOBlockSystem>(iso);
 	}
 
 	pspFileSystem.Remount("umd0:", blockSystem);
@@ -218,7 +210,7 @@ void InitMemoryForGamePBP(FileLoader *fileLoader) {
 // that probably loads a plugin and then launches the actual game. These stubs don't work in PPSSPP.
 // No idea why they are doing this, but it works to just bypass it. They could stop
 // inventing new filenames though...
-static const char *altBootNames[] = {
+static const char * const altBootNames[] = {
 	"disc0:/PSP_GAME/SYSDIR/EBOOT.OLD",
 	"disc0:/PSP_GAME/SYSDIR/EBOOT.DAT",
 	"disc0:/PSP_GAME/SYSDIR/EBOOT.BI",
@@ -247,8 +239,8 @@ bool Load_PSP_ISO(FileLoader *fileLoader, std::string *error_string) {
 		pspFileSystem.ReadEntireFile(sfoPath, paramsfo);
 		if (g_paramSFO.ReadSFO(paramsfo)) {
 			std::string title = StringFromFormat("%s : %s", g_paramSFO.GetValueString("DISC_ID").c_str(), g_paramSFO.GetValueString("TITLE").c_str());
-			INFO_LOG(LOADER, "%s", title.c_str());
-			host->SetWindowTitle(title.c_str());
+			INFO_LOG(Log::Loader, "%s", title.c_str());
+			System_SetWindowTitle(title);
 		}
 	}
 
@@ -282,7 +274,7 @@ bool Load_PSP_ISO(FileLoader *fileLoader, std::string *error_string) {
 		pspFileSystem.CloseFile(fd);
 	}
 	if (!hasEncrypted) {
-		// try unencrypted BOOT.BIN
+		// try unencrypted Boot.BIN
 		bootpath = "disc0:/PSP_GAME/SYSDIR/BOOT.BIN";
 	}
 
@@ -306,24 +298,31 @@ bool Load_PSP_ISO(FileLoader *fileLoader, std::string *error_string) {
 
 	//in case we didn't go through EmuScreen::boot
 	g_Config.loadGameConfig(id, g_paramSFO.GetValueString("TITLE"));
-	host->SendUIMessage("config_loaded", "");
-	INFO_LOG(LOADER,"Loading %s...", bootpath.c_str());
+	System_PostUIMessage(UIMessage::CONFIG_LOADED);
+	INFO_LOG(Log::Loader, "Loading %s...", bootpath.c_str());
 
 	PSPLoaders_Shutdown();
 	// Note: this thread reads the game binary, loads caches, and links HLE while UI spins.
 	// To do something deterministically when the game starts, disabling this thread won't be enough.
 	// Instead: Use Core_ListenLifecycle() or watch coreState.
-	loadingThread = std::thread([bootpath] {
+	g_loadingThread = std::thread([bootpath] {
 		SetCurrentThreadName("ExecLoader");
 		PSP_LoadingLock guard;
 		if (coreState != CORE_POWERUP)
 			return;
 
-		PSP_SetLoading("Loading executable...");
+		AndroidJNIThreadContext jniContext;
+
+		INFO_LOG(Log::System, "Loading executable...");
 		// TODO: We can't use the initial error_string pointer.
 		bool success = __KernelLoadExec(bootpath.c_str(), 0, &PSP_CoreParameter().errorString);
 		if (success && coreState == CORE_POWERUP) {
-			coreState = PSP_CoreParameter().startBreak ? CORE_STEPPING : CORE_RUNNING;
+			if (PSP_CoreParameter().startBreak) {
+				coreState = CORE_STEPPING_CPU;
+				System_Notify(SystemNotification::DEBUG_MODE_CHANGE);
+			} else {
+				coreState = CORE_RUNNING_CPU;
+			}
 		} else {
 			coreState = CORE_BOOT_ERROR;
 			// TODO: This is a crummy way to communicate the error...
@@ -366,8 +365,8 @@ bool Load_PSP_ELF_PBP(FileLoader *fileLoader, std::string *error_string) {
 	if (PSP_CoreParameter().mountIsoLoader != nullptr) {
 		auto bd = constructBlockDevice(PSP_CoreParameter().mountIsoLoader);
 		if (bd != NULL) {
-			std::shared_ptr<IFileSystem> umd2 = std::shared_ptr<IFileSystem>(new ISOFileSystem(&pspFileSystem, bd));
-			std::shared_ptr<IFileSystem> blockSystem = std::shared_ptr<IFileSystem>(new ISOBlockSystem(umd2));
+			auto umd2 = std::make_shared<ISOFileSystem>(&pspFileSystem, bd);
+			auto blockSystem = std::make_shared<ISOBlockSystem>(umd2);
 
 			pspFileSystem.Mount("umd1:", blockSystem);
 			pspFileSystem.Mount("disc0:", umd2);
@@ -379,6 +378,10 @@ bool Load_PSP_ELF_PBP(FileLoader *fileLoader, std::string *error_string) {
 	std::string path = full_path.GetDirectory();
 	std::string file = full_path.GetFilename();
 
+	if (full_path.Type() == PathType::CONTENT_URI) {
+		path = AndroidContentURI(full_path.GetDirectory()).FilePath();
+	}
+
 	size_t pos = path.find("PSP/GAME/");
 	std::string ms_path;
 	if (pos != std::string::npos) {
@@ -389,10 +392,15 @@ bool Load_PSP_ELF_PBP(FileLoader *fileLoader, std::string *error_string) {
 		ms_path = "umd0:/";
 	}
 
+	Path dir;
 	if (!PSP_CoreParameter().mountRoot.empty()) {
 		// We don't want to worry about .. and cwd and such.
 		const Path rootNorm = NormalizePath(PSP_CoreParameter().mountRoot);
-		const Path pathNorm = NormalizePath(Path(path));
+		Path pathNorm = NormalizePath(Path(path));
+
+		if (full_path.Type() == PathType::CONTENT_URI) {
+			pathNorm = full_path.NavigateUp();
+		}
 
 		// If root is not a subpath of path, we can't boot the game.
 		if (!pathNorm.StartsWith(rootNorm)) {
@@ -401,34 +409,46 @@ bool Load_PSP_ELF_PBP(FileLoader *fileLoader, std::string *error_string) {
 			return false;
 		}
 
-		// TODO(scoped): This won't work!
-		const std::string filepath = ReplaceAll(pathNorm.ToString().substr(rootNorm.ToString().size()), "\\", "/");
+		std::string filepath;
+		if (full_path.Type() == PathType::CONTENT_URI) {
+			std::string rootFilePath = AndroidContentURI(rootNorm.c_str()).FilePath();
+			std::string pathFilePath = AndroidContentURI(pathNorm.c_str()).FilePath();
+			filepath = pathFilePath.substr(rootFilePath.size());
+		} else {
+			filepath = ReplaceAll(pathNorm.ToString().substr(rootNorm.ToString().size()), "\\", "/");
+		}
+
 		file = filepath + "/" + file;
-		path = rootNorm.ToString() + "/";
+		path = rootNorm.ToString();
 		pspFileSystem.SetStartingDirectory(filepath);
+		dir = Path(path);
 	} else {
 		pspFileSystem.SetStartingDirectory(ms_path);
+		dir = full_path.NavigateUp();
 	}
 
-	std::shared_ptr<IFileSystem> fs = std::shared_ptr<IFileSystem>(new DirectoryFileSystem(&pspFileSystem, Path(path), FileSystemFlags::SIMULATE_FAT32 | FileSystemFlags::CARD));
+	auto fs = std::make_shared<DirectoryFileSystem>(&pspFileSystem, dir, FileSystemFlags::SIMULATE_FAT32 | FileSystemFlags::CARD);
 	pspFileSystem.Mount("umd0:", fs);
 
 	std::string finalName = ms_path + file;
 
 	std::string homebrewName = PSP_CoreParameter().fileToStart.ToVisualString();
-	std::size_t lslash = homebrewName.find_last_of("/");
+	std::size_t lslash = homebrewName.find_last_of('/');
+	std::size_t rslash = homebrewName.find_last_of('\\');
 	if (lslash != homebrewName.npos)
 		homebrewName = homebrewName.substr(lslash + 1);
+	if (rslash != homebrewName.npos)
+		homebrewName = homebrewName.substr(rslash + 1);
 	std::string homebrewTitle = g_paramSFO.GetValueString("TITLE");
 	if (homebrewTitle.empty())
 		homebrewTitle = homebrewName;
 	std::string discID = g_paramSFO.GetDiscID();
 	std::string discVersion = g_paramSFO.GetValueString("DISC_VERSION");
-	std::string madeUpID = g_paramSFO.GenerateFakeID();
+	std::string madeUpID = g_paramSFO.GenerateFakeID(Path());
 
 	std::string title = StringFromFormat("%s : %s", discID.c_str(), homebrewTitle.c_str());
-	INFO_LOG(LOADER, "%s", title.c_str());
-	host->SetWindowTitle(title.c_str());
+	INFO_LOG(Log::Loader, "%s", title.c_str());
+	System_SetWindowTitle(title);
 
 	// Migrate old save states from old versions of fake game IDs.
 	const Path savestateDir = GetSysDirectory(DIRECTORY_SAVESTATE);
@@ -449,15 +469,22 @@ bool Load_PSP_ELF_PBP(FileLoader *fileLoader, std::string *error_string) {
 
 	PSPLoaders_Shutdown();
 	// Note: See Load_PSP_ISO for notes about this thread.
-	loadingThread = std::thread([finalName] {
+	g_loadingThread = std::thread([finalName] {
 		SetCurrentThreadName("ExecLoader");
 		PSP_LoadingLock guard;
 		if (coreState != CORE_POWERUP)
 			return;
 
+		AndroidJNIThreadContext jniContext;
+
 		bool success = __KernelLoadExec(finalName.c_str(), 0, &PSP_CoreParameter().errorString);
 		if (success && coreState == CORE_POWERUP) {
-			coreState = PSP_CoreParameter().startBreak ? CORE_STEPPING : CORE_RUNNING;
+			if (PSP_CoreParameter().startBreak) {
+				coreState = CORE_STEPPING_CPU;
+				System_Notify(SystemNotification::DEBUG_MODE_CHANGE);
+			} else {
+				coreState = CORE_RUNNING_CPU;
+			}
 		} else {
 			coreState = CORE_BOOT_ERROR;
 			// TODO: This is a crummy way to communicate the error...
@@ -468,20 +495,27 @@ bool Load_PSP_ELF_PBP(FileLoader *fileLoader, std::string *error_string) {
 }
 
 bool Load_PSP_GE_Dump(FileLoader *fileLoader, std::string *error_string) {
-	std::shared_ptr<IFileSystem> umd = std::shared_ptr<IFileSystem>(new BlobFileSystem(&pspFileSystem, fileLoader, "data.ppdmp"));
+	auto umd = std::make_shared<BlobFileSystem>(&pspFileSystem, fileLoader, "data.ppdmp");
 	pspFileSystem.Mount("disc0:", umd);
 
 	PSPLoaders_Shutdown();
 	// Note: See Load_PSP_ISO for notes about this thread.
-	loadingThread = std::thread([] {
+	g_loadingThread = std::thread([] {
 		SetCurrentThreadName("ExecLoader");
 		PSP_LoadingLock guard;
 		if (coreState != CORE_POWERUP)
 			return;
 
+		AndroidJNIThreadContext jniContext;
+
 		bool success = __KernelLoadGEDump("disc0:/data.ppdmp", &PSP_CoreParameter().errorString);
 		if (success && coreState == CORE_POWERUP) {
-			coreState = PSP_CoreParameter().startBreak ? CORE_STEPPING : CORE_RUNNING;
+			if (PSP_CoreParameter().startBreak) {
+				coreState = CORE_STEPPING_CPU;
+				System_Notify(SystemNotification::DEBUG_MODE_CHANGE);
+			} else {
+				coreState = CORE_RUNNING_CPU;
+			}
 		} else {
 			coreState = CORE_BOOT_ERROR;
 			// TODO: This is a crummy way to communicate the error...
@@ -492,6 +526,6 @@ bool Load_PSP_GE_Dump(FileLoader *fileLoader, std::string *error_string) {
 }
 
 void PSPLoaders_Shutdown() {
-	if (loadingThread.joinable())
-		loadingThread.join();
+	if (g_loadingThread.joinable())
+		g_loadingThread.join();
 }

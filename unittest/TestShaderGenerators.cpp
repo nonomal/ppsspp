@@ -18,6 +18,7 @@
 #include "GPU/Common/DepalettizeShaderCommon.h"
 
 #if PPSSPP_PLATFORM(WINDOWS)
+#include <wrl/client.h>
 #include "GPU/D3D11/D3D11Util.h"
 #include "GPU/D3D11/D3D11Loader.h"
 
@@ -28,32 +29,36 @@
 static constexpr size_t CODE_BUFFER_SIZE = 32768;
 
 bool GenerateFShader(FShaderID id, char *buffer, ShaderLanguage lang, Draw::Bugs bugs, std::string *errorString) {
+	buffer[0] = '\0';
+
+	FragmentShaderFlags flags;
+
 	uint64_t uniformMask;
 	switch (lang) {
 	case ShaderLanguage::GLSL_VULKAN:
 	{
 		ShaderLanguageDesc compat(ShaderLanguage::GLSL_VULKAN);
-		return GenerateFragmentShader(id, buffer, compat, bugs, &uniformMask, nullptr, errorString);
+		return GenerateFragmentShader(id, buffer, compat, bugs, &uniformMask, &flags, errorString);
 	}
 	case ShaderLanguage::GLSL_1xx:
 	{
 		ShaderLanguageDesc compat(ShaderLanguage::GLSL_1xx);
-		return GenerateFragmentShader(id, buffer, compat, bugs, &uniformMask, nullptr, errorString);
+		return GenerateFragmentShader(id, buffer, compat, bugs, &uniformMask, &flags, errorString);
 	}
 	case ShaderLanguage::GLSL_3xx:
 	{
 		ShaderLanguageDesc compat(ShaderLanguage::GLSL_3xx);
-		return GenerateFragmentShader(id, buffer, compat, bugs, &uniformMask, nullptr, errorString);
+		return GenerateFragmentShader(id, buffer, compat, bugs, &uniformMask, &flags, errorString);
 	}
 	case ShaderLanguage::HLSL_D3D9:
 	{
 		ShaderLanguageDesc compat(ShaderLanguage::HLSL_D3D9);
-		return GenerateFragmentShader(id, buffer, compat, bugs, &uniformMask, nullptr, errorString);
+		return GenerateFragmentShader(id, buffer, compat, bugs, &uniformMask, &flags, errorString);
 	}
 	case ShaderLanguage::HLSL_D3D11:
 	{
 		ShaderLanguageDesc compat(ShaderLanguage::HLSL_D3D11);
-		return GenerateFragmentShader(id, buffer, compat, bugs, &uniformMask, nullptr, errorString);
+		return GenerateFragmentShader(id, buffer, compat, bugs, &uniformMask, &flags, errorString);
 	}
 	default:
 		return false;
@@ -61,33 +66,37 @@ bool GenerateFShader(FShaderID id, char *buffer, ShaderLanguage lang, Draw::Bugs
 }
 
 bool GenerateVShader(VShaderID id, char *buffer, ShaderLanguage lang, Draw::Bugs bugs, std::string *errorString) {
+	buffer[0] = '\0';
+
+	VertexShaderFlags flags;
+
 	uint32_t attrMask;
 	uint64_t uniformMask;
 	switch (lang) {
 	case ShaderLanguage::GLSL_VULKAN:
 	{
 		ShaderLanguageDesc compat(ShaderLanguage::GLSL_VULKAN);
-		return GenerateVertexShader(id, buffer, compat, bugs, &attrMask, &uniformMask, errorString);
+		return GenerateVertexShader(id, buffer, compat, bugs, &attrMask, &uniformMask, &flags, errorString);
 	}
 	case ShaderLanguage::GLSL_1xx:
 	{
 		ShaderLanguageDesc compat(ShaderLanguage::GLSL_1xx);
-		return GenerateVertexShader(id, buffer, compat, bugs, &attrMask, &uniformMask, errorString);
+		return GenerateVertexShader(id, buffer, compat, bugs, &attrMask, &uniformMask, &flags, errorString);
 	}
 	case ShaderLanguage::GLSL_3xx:
 	{
 		ShaderLanguageDesc compat(ShaderLanguage::GLSL_3xx);
-		return GenerateVertexShader(id, buffer, compat, bugs, &attrMask, &uniformMask, errorString);
+		return GenerateVertexShader(id, buffer, compat, bugs, &attrMask, &uniformMask, &flags, errorString);
 	}
 	case ShaderLanguage::HLSL_D3D9:
 	{
 		ShaderLanguageDesc compat(ShaderLanguage::HLSL_D3D9);
-		return GenerateVertexShader(id, buffer, compat, bugs, &attrMask, &uniformMask, errorString);
+		return GenerateVertexShader(id, buffer, compat, bugs, &attrMask, &uniformMask, &flags, errorString);
 	}
 	case ShaderLanguage::HLSL_D3D11:
 	{
 		ShaderLanguageDesc compat(ShaderLanguage::HLSL_D3D11);
-		return GenerateVertexShader(id, buffer, compat, bugs, &attrMask, &uniformMask, errorString);
+		return GenerateVertexShader(id, buffer, compat, bugs, &attrMask, &uniformMask, &flags, errorString);
 	}
 	default:
 		return false;
@@ -95,6 +104,8 @@ bool GenerateVShader(VShaderID id, char *buffer, ShaderLanguage lang, Draw::Bugs
 }
 
 bool GenerateGShader(GShaderID id, char *buffer, ShaderLanguage lang, Draw::Bugs bugs, std::string *errorString) {
+	buffer[0] = '\0';
+
 	errorString->clear();
 
 	switch (lang) {
@@ -154,13 +165,9 @@ bool TestCompileShader(const char *buffer, ShaderLanguage lang, ShaderStage stag
 		case ShaderStage::Fragment: programType = "ps_3_0"; break;
 		default: return false;
 		}
-		LPD3DBLOB blob = CompileShaderToByteCodeD3D9(buffer, programType, errorMessage);
-		if (blob) {
-			blob->Release();
-			return true;
-		} else {
-			return false;
-		}
+		Microsoft::WRL::ComPtr<ID3DBlob> blob;
+		HRESULT hr = CompileShaderToByteCodeD3D9(buffer, programType, errorMessage, &blob);
+		return SUCCEEDED(hr);
 	}
 #endif
 
@@ -285,17 +292,21 @@ bool TestStencilShaders() {
 		ShaderLanguageDesc desc(languages[k]);
 		std::string errorMessage;
 
-		// Generate all despite failures - it's only 6.
-		GenerateStencilFs(buffer, desc, bugs);
-		if (strlen(buffer) >= 8192) {
-			printf("Stencil fragment shader exceeded buffer:\n\n%s\n", LineNumberString(buffer).c_str());
-			failed = true;
-		}
-		if (!TestCompileShader(buffer, languages[k], ShaderStage::Fragment, &errorMessage)) {
-			printf("Error compiling stencil shader:\n\n%s\n\n%s\n", LineNumberString(buffer).c_str(), errorMessage.c_str());
-			failed = true;
-		} else {
-			printf("===\n%s\n===\n", buffer);
+		// Generate all despite failures - it's only a few.
+		// Only use export on Vulkan, because GLSL_3xx is ES which doesn't support stencil export.
+		bool allowUseExport = languages[k] == ShaderLanguage::GLSL_VULKAN;
+		for (int useExport = 0; useExport <= (allowUseExport ? 1 : 0); ++useExport) {
+			GenerateStencilFs(buffer, desc, bugs, useExport == 1);
+			if (strlen(buffer) >= 8192) {
+				printf("Stencil fragment shader (useExport=%d) exceeded buffer:\n\n%s\n", useExport, LineNumberString(buffer).c_str());
+				failed = true;
+			}
+			if (!TestCompileShader(buffer, languages[k], ShaderStage::Fragment, &errorMessage)) {
+				printf("Error compiling stencil shader (useExport=%d):\n\n%s\n\n%s\n", useExport, LineNumberString(buffer).c_str(), errorMessage.c_str());
+				failed = true;
+			} else {
+				printf("===\n%s\n===\n", buffer);
+			}
 		}
 
 		GenerateStencilVs(buffer, desc);
