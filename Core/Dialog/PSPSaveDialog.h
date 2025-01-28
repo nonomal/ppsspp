@@ -69,40 +69,38 @@
 #define SCE_UTILITY_SAVEDATA_ERROR_SIZES_WRONG_UMD      (0x801103Ca)
 #define SCE_UTILITY_SAVEDATA_ERROR_SIZES_INTERNAL       (0x801103Cb)
 
-class PSPSaveDialog: public PSPDialog {
+class PSPSaveDialog : public PSPDialog {
 public:
 	PSPSaveDialog(UtilityDialogType type);
-	virtual ~PSPSaveDialog();
+	~PSPSaveDialog();
 
-	virtual int Init(int paramAddr);
-	virtual int Update(int animSpeed) override;
-	virtual int Shutdown(bool force = false) override;
-	virtual void DoState(PointerWrap &p) override;
-	virtual pspUtilityDialogCommon *GetCommonParam() override;
+	int Init(int paramAddr);
+	int Update(int animSpeed) override;
+	int Shutdown(bool force = false) override;
+	void DoState(PointerWrap &p) override;
+	pspUtilityDialogCommon *GetCommonParam() override;
 
 	void ExecuteIOAction();
 
 protected:
-	virtual bool UseAutoStatus() override {
+	bool UseAutoStatus() override {
 		return false;
 	}
 
 private:
-
 	void DisplayBanner(int which);
 	void DisplaySaveList(bool canMove = true);
 	void DisplaySaveIcon(bool checkExists);
 	void DisplaySaveDataInfo1();
 	void DisplaySaveDataInfo2(bool showNewData = false);
-	void DisplayMessage(std::string text, bool hasYesNo = false);
-	const std::string GetSelectedSaveDirName() const;
+	void DisplayMessage(std::string_view text, bool hasYesNo = false);
+	std::string GetSelectedSaveDirName() const;
 
 	void JoinIOThread();
 	void StartIOThread();
 	void ExecuteNotVisibleIOAction();
 
-	enum DisplayState
-	{
+	enum DisplayState {
 		DS_NONE,
 
 		DS_SAVE_LIST_CHOICE,
@@ -128,8 +126,7 @@ private:
 		DS_DELETE_FAILED,
 	};
 
-	enum DialogBanner
-	{
+	enum DialogBanner {
 		DB_NONE,
 		DB_SAVE,
 		DB_LOAD,
@@ -145,10 +142,7 @@ private:
 	u32 requestAddr = 0;
 	int currentSelectedSave = 0;
 
-	int yesnoChoice = 0;
-
-	enum SaveIOStatus
-	{
+	enum SaveIOStatus {
 		SAVEIO_NONE,
 		SAVEIO_PENDING,
 		SAVEIO_DONE,

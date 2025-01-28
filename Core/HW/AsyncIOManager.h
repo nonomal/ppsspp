@@ -15,10 +15,13 @@
 // Official git repository and contact information can be found at
 // https://github.com/hrydgard/ppsspp and http://www.ppsspp.org/.
 
+#pragma once
+
 #include <map>
 #include <set>
 #include <mutex>
 
+#include "Core/Core.h"
 #include "Core/ThreadEventQueue.h"
 
 class NoBase {
@@ -81,7 +84,7 @@ public:
 	void DoState(PointerWrap &p);
 
 	bool HasOperation(u32 handle);
-	void ScheduleOperation(AsyncIOEvent ev);
+	void ScheduleOperation(const AsyncIOEvent &ev);
 	void Shutdown();
 
 	bool HasResult(u32 handle);
@@ -98,9 +101,9 @@ private:
 	bool PopResult(u32 handle, AsyncIOResult &result);
 	bool ReadResult(u32 handle, AsyncIOResult &result);
 	void Read(u32 handle, u8 *buf, size_t bytes, u32 invalidateAddr);
-	void Write(u32 handle, u8 *buf, size_t bytes);
+	void Write(u32 handle, const u8 *buf, size_t bytes);
 
-	void EventResult(u32 handle, AsyncIOResult result);
+	void EventResult(u32 handle, const AsyncIOResult &result);
 
 	std::mutex resultsLock_;
 	std::condition_variable resultsWait_;

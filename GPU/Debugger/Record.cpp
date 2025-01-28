@@ -38,7 +38,7 @@
 #include "Core/System.h"
 #include "Core/ThreadPools.h"
 #include "GPU/Common/GPUDebugInterface.h"
-#include "GPU/GPUInterface.h"
+#include "GPU/GPUCommon.h"
 #include "GPU/GPUState.h"
 #include "GPU/ge_constants.h"
 #include "GPU/Common/TextureDecoder.h"
@@ -48,33 +48,9 @@
 
 namespace GPURecord {
 
-static bool active = false;
-static bool nextFrame = false;
-static int flipLastAction = -1;
-static int flipFinishAt = -1;
-static uint32_t lastEdramTrans = 0x400;
-static std::function<void(const Path &)> writeCallback;
-
-static std::vector<u8> pushbuf;
-static std::vector<Command> commands;
-static std::vector<u32> lastRegisters;
-static std::vector<u32> lastTextures;
-static std::set<u32> lastRenderTargets;
-
-enum class DirtyVRAMFlag : uint8_t {
-	CLEAN = 0,
-	DIRTY = 1,
-	DRAWN = 2,
-};
-static constexpr uint32_t DIRTY_VRAM_SHIFT = 8;
-static constexpr uint32_t DIRTY_VRAM_ROUND = (1 << DIRTY_VRAM_SHIFT) - 1;
-static constexpr uint32_t DIRTY_VRAM_SIZE = (2 * 1024 * 1024) >> DIRTY_VRAM_SHIFT;
-static constexpr uint32_t DIRTY_VRAM_MASK = (2 * 1024 * 1024 - 1) >> DIRTY_VRAM_SHIFT;
-static DirtyVRAMFlag dirtyVRAM[DIRTY_VRAM_SIZE];
-
-static void FlushRegisters() {
+void Recorder::FlushRegisters() {
 	if (!lastRegisters.empty()) {
-		Command last{CommandType::REGISTERS};
+		Command last{ CommandType::REGISTERS };
 		last.ptr = (u32)pushbuf.size();
 		last.sz = (u32)(lastRegisters.size() * sizeof(u32));
 		pushbuf.resize(pushbuf.size() + last.sz);
@@ -105,12 +81,19 @@ static Path GenRecordingFilename() {
 	return dumpDir / StringFromFormat("%s_%04d.ppdmp", prefix.c_str(), 9999);
 }
 
-static void DirtyAllVRAM(DirtyVRAMFlag flag) {
-	for (uint32_t i = 0; i < DIRTY_VRAM_SIZE; ++i)
-		dirtyVRAM[i] = flag;
+void Recorder::DirtyAllVRAM(DirtyVRAMFlag flag) {
+	if (flag == DirtyVRAMFlag::UNKNOWN) {
+		for (uint32_t i = 0; i < DIRTY_VRAM_SIZE; ++i) {
+			if (dirtyVRAM[i] == DirtyVRAMFlag::CLEAN)
+				dirtyVRAM[i] = DirtyVRAMFlag::UNKNOWN;
+		}
+	} else {
+		for (uint32_t i = 0; i < DIRTY_VRAM_SIZE; ++i)
+			dirtyVRAM[i] = flag;
+	}
 }
 
-static void DirtyVRAM(u32 start, u32 sz, DirtyVRAMFlag flag) {
+void Recorder::DirtyVRAM(u32 start, u32 sz, DirtyVRAMFlag flag) {
 	u32 count = (sz + DIRTY_VRAM_ROUND) >> DIRTY_VRAM_SHIFT;
 	u32 first = (start >> DIRTY_VRAM_SHIFT) & DIRTY_VRAM_MASK;
 	if (first + count > DIRTY_VRAM_SIZE) {
@@ -122,11 +105,11 @@ static void DirtyVRAM(u32 start, u32 sz, DirtyVRAMFlag flag) {
 		dirtyVRAM[first + i] = flag;
 }
 
-static void DirtyDrawnVRAM() {
-	int w = std::max(gstate.getScissorX2(), gstate.getRegionX2()) + 1;
-	int h = std::max(gstate.getScissorY2(), gstate.getRegionY2()) + 1;
+void Recorder::DirtyDrawnVRAM() {
+	int w = std::min(gstate.getScissorX2(), gstate.getRegionX2()) + 1;
+	int h = std::min(gstate.getScissorY2(), gstate.getRegionY2()) + 1;
 
-	bool drawZ = gstate.isDepthWriteEnabled() && gstate.isDepthTestEnabled();
+	bool drawZ = !gstate.isModeClear() && gstate.isDepthWriteEnabled() && gstate.isDepthTestEnabled();
 	bool clearZ = gstate.isModeClear() && gstate.isClearModeDepthMask();
 	if (drawZ || clearZ) {
 		int bytes = 2 * gstate.DepthBufStride() * h;
@@ -142,7 +125,12 @@ static void DirtyDrawnVRAM() {
 	DirtyVRAM(gstate.getFrameBufAddress(), bytes, DirtyVRAMFlag::DRAWN);
 }
 
-static void BeginRecording() {
+bool Recorder::BeginRecording() {
+	if (PSP_CoreParameter().fileType == IdentifiedFileType::PPSSPP_GE_DUMP) {
+		// Can't record a GE dump.
+		return false;
+	}
+
 	active = true;
 	nextFrame = false;
 	lastTextures.clear();
@@ -154,7 +142,8 @@ static void BeginRecording() {
 	u32 sz = 512 * 4;
 	pushbuf.resize(pushbuf.size() + sz);
 	gstate.Save((u32_le *)(pushbuf.data() + ptr));
-	commands.push_back({CommandType::INIT, sz, ptr});
+	commands.push_back({ CommandType::INIT, sz, ptr });
+	lastVRAM.resize(2 * 1024 * 1024);
 
 	// Also save the initial CLUT.
 	GPUDebugBuffer clut;
@@ -168,6 +157,7 @@ static void BeginRecording() {
 	}
 
 	DirtyAllVRAM(DirtyVRAMFlag::DIRTY);
+	return true;
 }
 
 static void WriteCompressed(FILE *fp, const void *p, size_t sz) {
@@ -179,19 +169,19 @@ static void WriteCompressed(FILE *fp, const void *p, size_t sz) {
 	fwrite(&write_size, sizeof(write_size), 1, fp);
 	fwrite(compressed, compressed_size, 1, fp);
 
-	delete [] compressed;
+	delete[] compressed;
 }
 
-static Path WriteRecording() {
+Path Recorder::WriteRecording() {
 	FlushRegisters();
 
 	const Path filename = GenRecordingFilename();
 
-	NOTICE_LOG(G3D, "Recording filename: %s", filename.c_str());
+	NOTICE_LOG(Log::G3D, "Recording filename: %s", filename.c_str());
 
 	FILE *fp = File::OpenCFile(filename, "wb");
 	Header header{};
-	strncpy(header.magic, HEADER_MAGIC, sizeof(header.magic));
+	memcpy(header.magic, HEADER_MAGIC, sizeof(header.magic));
 	header.version = VERSION;
 	strncpy(header.gameID, g_paramSFO.GetDiscID().c_str(), sizeof(header.gameID));
 	fwrite(&header, sizeof(header), 1, fp);
@@ -277,15 +267,15 @@ static const u8 *mymemmem(const u8 *haystack, size_t off, size_t hlen, const u8 
 			p++;
 			alignp();
 		}
-	}, 0, range, 128 * 1024);
+	}, 0, range, 128 * 1024, TaskPriority::LOW);
 
 	return result;
 }
 
-static Command EmitCommandWithRAM(CommandType t, const void *p, u32 sz, u32 align) {
+Command Recorder::EmitCommandWithRAM(CommandType t, const void *p, u32 sz, u32 align) {
 	FlushRegisters();
 
-	Command cmd{t, sz, 0};
+	Command cmd{ t, sz, 0 };
 
 	if (sz) {
 		// If at all possible, try to find it already in the buffer.
@@ -321,26 +311,71 @@ static Command EmitCommandWithRAM(CommandType t, const void *p, u32 sz, u32 alig
 	return cmd;
 }
 
-static u32 GetTargetFlags(u32 addr, u32 sizeInRAM) {
+void Recorder::UpdateLastVRAM(u32 addr, u32 bytes) {
+	u32 base = addr & 0x001FFFFF;
+	if (base + bytes > 0x00200000) {
+		memcpy(&lastVRAM[base], Memory::GetPointerUnchecked(0x04000000 | base), 0x00200000 - base);
+		bytes = base + bytes - 0x00200000;
+		base = 0;
+	}
+	memcpy(&lastVRAM[base], Memory::GetPointerUnchecked(0x04000000 | base), bytes);
+}
+
+void Recorder::ClearLastVRAM(u32 addr, u8 c, u32 bytes) {
+	u32 base = addr & 0x001FFFFF;
+	if (base + bytes > 0x00200000) {
+		memset(&lastVRAM[base], c, 0x00200000 - base);
+		bytes = base + bytes - 0x00200000;
+		base = 0;
+	}
+	memset(&lastVRAM[base], c, bytes);
+}
+
+int Recorder::CompareLastVRAM(u32 addr, u32 bytes) const {
+	u32 base = addr & 0x001FFFFF;
+	if (base + bytes > 0x00200000) {
+		int result = memcmp(&lastVRAM[base], Memory::GetPointerUnchecked(0x04000000 | base), 0x00200000 - base);
+		if (result != 0)
+			return result;
+
+		bytes = base + bytes - 0x00200000;
+		base = 0;
+	}
+	return memcmp(&lastVRAM[base], Memory::GetPointerUnchecked(0x04000000 | base), bytes);
+}
+
+u32 Recorder::GetTargetFlags(u32 addr, u32 sizeInRAM) {
 	addr &= 0x041FFFFF;
 	const bool isTarget = lastRenderTargets.find(addr) != lastRenderTargets.end();
 
+	bool isUnknownVRAM = false;
 	bool isDirtyVRAM = false;
 	bool isDrawnVRAM = false;
 	uint32_t start = (addr >> DIRTY_VRAM_SHIFT) & DIRTY_VRAM_MASK;
 	uint32_t blocks = (sizeInRAM + DIRTY_VRAM_ROUND) >> DIRTY_VRAM_SHIFT;
+	if (start + blocks >= DIRTY_VRAM_SIZE)
+		return 0;
 	bool startEven = (addr & DIRTY_VRAM_ROUND) == 0;
 	bool endEven = ((addr + sizeInRAM) & DIRTY_VRAM_ROUND) == 0;
 	for (uint32_t i = 0; i < blocks; ++i) {
 		DirtyVRAMFlag flag = dirtyVRAM[start + i];
+		isUnknownVRAM = (isUnknownVRAM || flag == DirtyVRAMFlag::UNKNOWN) && flag != DirtyVRAMFlag::DIRTY && flag != DirtyVRAMFlag::DRAWN;
 		isDirtyVRAM = isDirtyVRAM || flag != DirtyVRAMFlag::CLEAN;
 		isDrawnVRAM = isDrawnVRAM || flag == DirtyVRAMFlag::DRAWN;
 
 		// Mark the VRAM clean now that it's been copied to VRAM.
-		if (flag == DirtyVRAMFlag::DIRTY) {
+		if (flag == DirtyVRAMFlag::UNKNOWN || flag == DirtyVRAMFlag::DIRTY) {
 			if ((i > 0 || startEven) && (i < blocks || endEven))
 				dirtyVRAM[start + i] = DirtyVRAMFlag::CLEAN;
 		}
+	}
+
+	if (isUnknownVRAM && isDirtyVRAM) {
+		// This means it's only UNKNOWN/CLEAN and not known to be actually dirty.
+		// Let's check our shadow copy of what we last sent for this VRAM.
+		int diff = CompareLastVRAM(addr, sizeInRAM);
+		if (diff == 0)
+			isDirtyVRAM = false;
 	}
 
 	// The isTarget flag is mostly used for replay of dumps on a PSP.
@@ -355,7 +390,7 @@ static u32 GetTargetFlags(u32 addr, u32 sizeInRAM) {
 	return flags;
 }
 
-static void EmitTextureData(int level, u32 texaddr) {
+void Recorder::EmitTextureData(int level, u32 texaddr) {
 	GETextureFormat format = gstate.getTextureFormat();
 	int w = gstate.getTextureWidth(level);
 	int h = gstate.getTextureHeight(level);
@@ -376,12 +411,15 @@ static void EmitTextureData(int level, u32 texaddr) {
 			u32 pad;
 		};
 
-		u32 flags = GetTargetFlags(texaddr, sizeInRAM);
+		u32 flags = GetTargetFlags(texaddr, bytes);
 		FramebufData framebuf{ texaddr, bufw, flags };
 		framebufData.resize(sizeof(framebuf) + bytes);
 		memcpy(&framebufData[0], &framebuf, sizeof(framebuf));
 		memcpy(&framebufData[sizeof(framebuf)], p, bytes);
 		p = &framebufData[0];
+
+		if ((flags & 2) == 0)
+			UpdateLastVRAM(texaddr, bytes);
 
 		// Okay, now we'll just emit this instead.
 		type = CommandType((int)CommandType::FRAMEBUF0 + level);
@@ -398,7 +436,7 @@ static void EmitTextureData(int level, u32 texaddr) {
 			}
 
 			if (memcmp(pushbuf.data() + prevptr, p, bytes) == 0) {
-				commands.push_back({type, bytes, prevptr});
+				commands.push_back({ type, bytes, prevptr });
 				// Okay, that was easy.  Bail out.
 				return;
 			}
@@ -410,7 +448,7 @@ static void EmitTextureData(int level, u32 texaddr) {
 	}
 }
 
-static void FlushPrimState(int vcount) {
+void Recorder::FlushPrimState(int vcount) {
 	// TODO: Eventually, how do we handle texturing from framebuf/zbuf?
 	// TODO: Do we need to preload color/depth/stencil (in case from last frame)?
 
@@ -418,11 +456,12 @@ static void FlushPrimState(int vcount) {
 	lastRenderTargets.insert(PSP_GetVidMemBase() | gstate.getDepthBufRawAddress());
 
 	// We re-flush textures always in case the game changed them... kinda expensive.
-	// TODO: Dirty textures on transfer/stall/etc. somehow?
-	// TODO: Or maybe de-dup by validating if it has changed?
+	bool textureEnabled = gstate.isTextureMapEnabled() || gstate.isAntiAliasEnabled();
+	// Play it safe and allow texture coords to emit data too.
+	bool textureCoords = (gstate.vertType & GE_VTYPE_TC_MASK) != 0;
 	for (int level = 0; level < 8; ++level) {
 		u32 texaddr = gstate.getTextureAddress(level);
-		if (texaddr) {
+		if (texaddr && (textureEnabled || textureCoords)) {
 			EmitTextureData(level, texaddr);
 		}
 	}
@@ -445,7 +484,7 @@ static void FlushPrimState(int vcount) {
 	}
 }
 
-static void EmitTransfer(u32 op) {
+void Recorder::EmitTransfer(u32 op) {
 	FlushRegisters();
 
 	// This may not make a lot of sense right now, unless it's to a framebuf...
@@ -480,7 +519,7 @@ static void EmitTransfer(u32 op) {
 	lastRegisters.push_back(op);
 }
 
-static void EmitClut(u32 op) {
+void Recorder::EmitClut(u32 op) {
 	u32 addr = gstate.getClutAddress();
 
 	// Hardware rendering may be using a framebuffer as CLUT.
@@ -504,10 +543,13 @@ static void EmitClut(u32 op) {
 			ClutAddrData data{ addr, flags };
 
 			FlushRegisters();
-			Command cmd{CommandType::CLUTADDR, sizeof(data), (u32)pushbuf.size()};
+			Command cmd{ CommandType::CLUTADDR, sizeof(data), (u32)pushbuf.size() };
 			pushbuf.resize(pushbuf.size() + sizeof(data));
 			memcpy(pushbuf.data() + cmd.ptr, &data, sizeof(data));
 			commands.push_back(cmd);
+
+			if ((flags & 2) == 0)
+				UpdateLastVRAM(addr, bytes);
 		}
 		EmitCommandWithRAM(CommandType::CLUT, Memory::GetPointerUnchecked(addr), bytes, 16);
 	}
@@ -515,14 +557,14 @@ static void EmitClut(u32 op) {
 	lastRegisters.push_back(op);
 }
 
-static void EmitPrim(u32 op) {
+void Recorder::EmitPrim(u32 op) {
 	FlushPrimState(op & 0x0000FFFF);
 
 	lastRegisters.push_back(op);
 	DirtyDrawnVRAM();
 }
 
-static void EmitBezierSpline(u32 op) {
+void Recorder::EmitBezierSpline(u32 op) {
 	int ucount = op & 0xFF;
 	int vcount = (op >> 8) & 0xFF;
 	FlushPrimState(ucount * vcount);
@@ -531,46 +573,41 @@ static void EmitBezierSpline(u32 op) {
 	DirtyDrawnVRAM();
 }
 
-bool IsActive() {
-	return active;
-}
-
-bool IsActivePending() {
-	return nextFrame || active;
-}
-
-bool Activate() {
+bool Recorder::RecordNextFrame(const std::function<void(const Path &)> callback) {
 	if (!nextFrame) {
-		nextFrame = true;
 		flipLastAction = gpuStats.numFlips;
 		flipFinishAt = -1;
+		writeCallback = callback;
+		nextFrame = true;
 		return true;
 	}
 	return false;
 }
 
-void SetCallback(const std::function<void(const Path &)> callback) {
-	writeCallback = callback;
-}
-
-static void FinishRecording() {
+void Recorder::FinishRecording() {
 	// We're done - this was just to write the result out.
+	if (!active) {
+		return;
+	}
+
 	Path filename = WriteRecording();
 	commands.clear();
 	pushbuf.clear();
+	lastVRAM.clear();
 
-	NOTICE_LOG(SYSTEM, "Recording finished");
+	NOTICE_LOG(Log::System, "Recording finished");
 	active = false;
 	flipLastAction = gpuStats.numFlips;
 	flipFinishAt = -1;
 	lastEdramTrans = 0x400;
 
-	if (writeCallback)
+	if (writeCallback) {
 		writeCallback(filename);
+	}
 	writeCallback = nullptr;
 }
 
-static void CheckEdramTrans() {
+void Recorder::CheckEdramTrans() {
 	if (!gpuDebug)
 		return;
 
@@ -580,13 +617,13 @@ static void CheckEdramTrans() {
 	lastEdramTrans = value;
 
 	FlushRegisters();
-	Command cmd{CommandType::EDRAMTRANS, sizeof(value), (u32)pushbuf.size()};
+	Command cmd{ CommandType::EDRAMTRANS, sizeof(value), (u32)pushbuf.size() };
 	pushbuf.resize(pushbuf.size() + sizeof(value));
 	memcpy(pushbuf.data() + cmd.ptr, &value, sizeof(value));
 	commands.push_back(cmd);
 }
 
-void NotifyCommand(u32 pc) {
+void Recorder::NotifyCommand(u32 pc) {
 	if (!active) {
 		return;
 	}
@@ -640,7 +677,7 @@ void NotifyCommand(u32 pc) {
 	}
 }
 
-void NotifyMemcpy(u32 dest, u32 src, u32 sz) {
+void Recorder::NotifyMemcpy(u32 dest, u32 src, u32 sz) {
 	if (!active) {
 		return;
 	}
@@ -648,20 +685,21 @@ void NotifyMemcpy(u32 dest, u32 src, u32 sz) {
 	CheckEdramTrans();
 	if (Memory::IsVRAMAddress(dest)) {
 		FlushRegisters();
-		Command cmd{CommandType::MEMCPYDEST, sizeof(dest), (u32)pushbuf.size()};
+		Command cmd{ CommandType::MEMCPYDEST, sizeof(dest), (u32)pushbuf.size() };
 		pushbuf.resize(pushbuf.size() + sizeof(dest));
 		memcpy(pushbuf.data() + cmd.ptr, &dest, sizeof(dest));
 		commands.push_back(cmd);
 
 		sz = Memory::ValidSize(dest, sz);
 		if (sz != 0) {
-			EmitCommandWithRAM(CommandType::MEMCPYDATA, Memory::GetPointer(dest), sz, 1);
-			DirtyVRAM(dest, sz, DirtyVRAMFlag::DIRTY);
+			EmitCommandWithRAM(CommandType::MEMCPYDATA, Memory::GetPointerUnchecked(dest), sz, 1);
+			UpdateLastVRAM(dest, sz);
+			DirtyVRAM(dest, sz, DirtyVRAMFlag::CLEAN);
 		}
 	}
 }
 
-void NotifyMemset(u32 dest, int v, u32 sz) {
+void Recorder::NotifyMemset(u32 dest, int v, u32 sz) {
 	if (!active) {
 		return;
 	}
@@ -675,30 +713,24 @@ void NotifyMemset(u32 dest, int v, u32 sz) {
 
 	if (Memory::IsVRAMAddress(dest)) {
 		sz = Memory::ValidSize(dest, sz);
-		MemsetCommand data{dest, v, sz};
+		MemsetCommand data{ dest, v, sz };
 
 		FlushRegisters();
-		Command cmd{CommandType::MEMSET, sizeof(data), (u32)pushbuf.size()};
+		Command cmd{ CommandType::MEMSET, sizeof(data), (u32)pushbuf.size() };
 		pushbuf.resize(pushbuf.size() + sizeof(data));
 		memcpy(pushbuf.data() + cmd.ptr, &data, sizeof(data));
 		commands.push_back(cmd);
-		DirtyVRAM(dest, sz, DirtyVRAMFlag::DIRTY);
+		ClearLastVRAM(dest, v, sz);
+		DirtyVRAM(dest, sz, DirtyVRAMFlag::CLEAN);
 	}
 }
 
-void NotifyUpload(u32 dest, u32 sz) {
-	if (!active) {
-		return;
-	}
-
-	if (Memory::IsVRAMAddress(dest)) {
-		// This also checks the edram translation value.
-		NotifyMemcpy(dest, dest, sz);
-		DirtyVRAM(dest, sz, DirtyVRAMFlag::DIRTY);
-	}
+void Recorder::NotifyUpload(u32 dest, u32 sz) {
+	// This also checks the edram translation value and dirties VRAM.
+	NotifyMemcpy(dest, dest, sz);
 }
 
-static bool HasDrawCommands() {
+bool Recorder::HasDrawCommands() const {
 	if (commands.empty())
 		return false;
 
@@ -717,14 +749,14 @@ static bool HasDrawCommands() {
 	return false;
 }
 
-void NotifyDisplay(u32 framebuf, int stride, int fmt) {
+void Recorder::NotifyDisplay(u32 framebuf, int stride, int fmt) {
 	bool writePending = false;
 	if (active && HasDrawCommands()) {
 		writePending = true;
 	}
-	if (nextFrame && (gstate_c.skipDrawReason & SKIPDRAW_SKIPFRAME) == 0) {
-		NOTICE_LOG(SYSTEM, "Recording starting on display...");
-		BeginRecording();
+	if (!active && nextFrame && (gstate_c.skipDrawReason & SKIPDRAW_SKIPFRAME) == 0) {
+		NOTICE_LOG(Log::System, "Recording starting on display...");
+		BeginRecording();  // TODO: Handle return value.
 	}
 	if (!active) {
 		return;
@@ -747,16 +779,16 @@ void NotifyDisplay(u32 framebuf, int stride, int fmt) {
 	commands.push_back({ CommandType::DISPLAY, sz, ptr });
 
 	if (writePending) {
-		NOTICE_LOG(SYSTEM, "Recording complete on display");
+		NOTICE_LOG(Log::System, "Recording complete on display");
 		FinishRecording();
 	}
 }
 
-void NotifyBeginFrame() {
+void Recorder::NotifyBeginFrame() {
 	const bool noDisplayAction = flipLastAction + 4 < gpuStats.numFlips;
 	// We do this only to catch things that don't call NotifyDisplay.
 	if (active && HasDrawCommands() && (noDisplayAction || gpuStats.numFlips == flipFinishAt)) {
-		NOTICE_LOG(SYSTEM, "Recording complete on frame");
+		NOTICE_LOG(Log::System, "Recording complete on frame");
 
 		CheckEdramTrans();
 		struct DisplayBufData {
@@ -777,20 +809,20 @@ void NotifyBeginFrame() {
 
 		FinishRecording();
 	}
-	if (nextFrame && (gstate_c.skipDrawReason & SKIPDRAW_SKIPFRAME) == 0 && noDisplayAction) {
-		NOTICE_LOG(SYSTEM, "Recording starting on frame...");
+	if (!active && nextFrame && (gstate_c.skipDrawReason & SKIPDRAW_SKIPFRAME) == 0 && noDisplayAction) {
+		NOTICE_LOG(Log::System, "Recording starting on frame...");
 		BeginRecording();
 		// If we began on a BeginFrame, end on a BeginFrame.
 		flipFinishAt = gpuStats.numFlips + 1;
 	}
 }
 
-void NotifyCPU() {
+void Recorder::NotifyCPU() {
 	if (!active) {
 		return;
 	}
 
-	DirtyAllVRAM(DirtyVRAMFlag::DIRTY);
+	DirtyAllVRAM(DirtyVRAMFlag::UNKNOWN);
 }
 
-};
+}  // namespace GPURecord

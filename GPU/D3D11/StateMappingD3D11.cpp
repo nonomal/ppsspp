@@ -22,13 +22,9 @@
 
 #include "Common/Data/Convert/SmallDataConvert.h"
 
-#include "GPU/Math3D.h"
 #include "GPU/GPUState.h"
 #include "GPU/ge_constants.h"
 #include "GPU/Common/GPUStateUtils.h"
-#include "Core/System.h"
-#include "Core/Config.h"
-#include "Core/Reporting.h"
 
 #include "GPU/Common/FramebufferManagerCommon.h"
 #include "GPU/D3D11/DrawEngineD3D11.h"
@@ -159,7 +155,7 @@ void DrawEngineD3D11::ApplyDrawState(int prim) {
 				ApplyStencilReplaceAndLogicOpIgnoreBlend(blendState.replaceAlphaWithStencil, blendState);
 
 				if (fboTexBindState == FBO_TEX_COPY_BIND_TEX) {
-					framebufferManager_->BindFramebufferAsColorTexture(1, framebufferManager_->GetCurrentRenderVFB(), BINDFBCOLOR_MAY_COPY);
+					framebufferManager_->BindFramebufferAsColorTexture(1, framebufferManager_->GetCurrentRenderVFB(), BINDFBCOLOR_MAY_COPY | BINDFBCOLOR_UNCACHED, 0);
 					// No sampler required, we do a plain Load in the pixel shader.
 					fboTexBound_ = true;
 					fboTexBindState = FBO_TEX_NONE;
@@ -270,10 +266,11 @@ void DrawEngineD3D11::ApplyDrawState(int prim) {
 		} else {
 			keys_.depthStencil.value = 0;
 			// Depth Test
-			if (gstate.isDepthTestEnabled()) {
+			if (!IsDepthTestEffectivelyDisabled()) {
 				keys_.depthStencil.depthTestEnable = true;
 				keys_.depthStencil.depthCompareOp = compareOps[gstate.getDepthTestFunction()];
 				keys_.depthStencil.depthWriteEnable = gstate.isDepthWriteEnabled();
+				UpdateEverUsedEqualDepth(gstate.getDepthTestFunction());
 			} else {
 				keys_.depthStencil.depthTestEnable = false;
 				keys_.depthStencil.depthWriteEnable = false;
@@ -356,8 +353,8 @@ void DrawEngineD3D11::ApplyDrawState(int prim) {
 	// There might have been interactions between depth and blend above.
 	if (gstate_c.IsDirty(DIRTY_BLEND_STATE)) {
 		if (!device1_) {
-			ID3D11BlendState *bs = blendCache_.Get(keys_.blend.value);
-			if (bs == nullptr) {
+			ID3D11BlendState *bs = nullptr;
+			if (!blendCache_.Get(keys_.blend.value, &bs) || !bs) {
 				D3D11_BLEND_DESC desc{};
 				D3D11_RENDER_TARGET_BLEND_DESC &rt = desc.RenderTarget[0];
 				rt.BlendEnable = keys_.blend.blendEnable;
@@ -373,8 +370,8 @@ void DrawEngineD3D11::ApplyDrawState(int prim) {
 			}
 			blendState_ = bs;
 		} else {
-			ID3D11BlendState1 *bs1 = blendCache1_.Get(keys_.blend.value);
-			if (bs1 == nullptr) {
+			ID3D11BlendState1 *bs1 = nullptr;
+			if (!blendCache1_.Get(keys_.blend.value, &bs1) || !bs1) {
 				D3D11_BLEND_DESC1 desc1{};
 				D3D11_RENDER_TARGET_BLEND_DESC1 &rt = desc1.RenderTarget[0];
 				rt.BlendEnable = keys_.blend.blendEnable;
@@ -395,8 +392,8 @@ void DrawEngineD3D11::ApplyDrawState(int prim) {
 	}
 
 	if (gstate_c.IsDirty(DIRTY_RASTER_STATE)) {
-		ID3D11RasterizerState *rs = rasterCache_.Get(keys_.raster.value);
-		if (rs == nullptr) {
+		ID3D11RasterizerState *rs;
+		if (!rasterCache_.Get(keys_.raster.value, &rs) || !rs) {
 			D3D11_RASTERIZER_DESC desc{};
 			desc.CullMode = (D3D11_CULL_MODE)(keys_.raster.cullMode);
 			desc.FillMode = D3D11_FILL_SOLID;
@@ -410,8 +407,8 @@ void DrawEngineD3D11::ApplyDrawState(int prim) {
 	}
 
 	if (gstate_c.IsDirty(DIRTY_DEPTHSTENCIL_STATE)) {
-		ID3D11DepthStencilState *ds = depthStencilCache_.Get(keys_.depthStencil.value);
-		if (ds == nullptr) {
+		ID3D11DepthStencilState *ds;
+		if (!depthStencilCache_.Get(keys_.depthStencil.value, &ds) || !ds) {
 			D3D11_DEPTH_STENCIL_DESC desc{};
 			desc.DepthEnable = keys_.depthStencil.depthTestEnable;
 			desc.DepthWriteMask = keys_.depthStencil.depthWriteEnable ? D3D11_DEPTH_WRITE_MASK_ALL : D3D11_DEPTH_WRITE_MASK_ZERO;
@@ -442,7 +439,7 @@ void DrawEngineD3D11::ApplyDrawState(int prim) {
 void DrawEngineD3D11::ApplyDrawStateLate(bool applyStencilRef, uint8_t stencilRef) {
 	// we go through Draw here because it automatically handles screen rotation, as needed in UWP on mobiles.
 	if (gstate_c.IsDirty(DIRTY_VIEWPORTSCISSOR_STATE)) {
-		draw_->SetViewports(1, &dynState_.viewport);
+		draw_->SetViewport(dynState_.viewport);
 		draw_->SetScissorRect(dynState_.scissor.left, dynState_.scissor.top, dynState_.scissor.right - dynState_.scissor.left, dynState_.scissor.bottom - dynState_.scissor.top);
 	}
 	if (gstate_c.IsDirty(DIRTY_RASTER_STATE)) {

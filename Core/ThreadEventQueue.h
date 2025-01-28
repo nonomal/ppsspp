@@ -28,6 +28,8 @@ template <typename B, typename Event, typename EventType, EventType EVENT_INVALI
 struct ThreadEventQueue : public B {
 	ThreadEventQueue() : threadEnabled_(false), eventsRunning_(false), eventsHaveRun_(false) {
 	}
+	virtual ~ThreadEventQueue() {
+	}
 
 	void SetThreadEnabled(bool threadEnabled) {
 		threadEnabled_ = threadEnabled;
@@ -134,7 +136,7 @@ struct ThreadEventQueue : public B {
 	inline bool ShouldSyncThread(bool force) {
 		if (!HasEvents())
 			return false;
-		if (coreState != CORE_RUNNING && !force)
+		if (coreState != CORE_RUNNING_CPU && !force)
 			return false;
 
 		// Don't run if it's not running, but wait for startup.

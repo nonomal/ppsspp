@@ -166,7 +166,6 @@ std::string __KernelThreadingSummary();
 KernelObject *__KernelThreadObject();
 KernelObject *__KernelCallbackObject();
 
-void __KernelScheduleWakeup(int threadnumber, s64 usFromNow);
 SceUID __KernelGetCurThread();
 int KernelCurThreadPriority();
 bool KernelChangeThreadPriority(SceUID threadID, int priority);
@@ -177,7 +176,7 @@ bool KernelIsThreadDormant(SceUID threadID);
 bool KernelIsThreadWaiting(SceUID threadID);
 
 void __KernelSaveContext(PSPThreadContext *ctx, bool vfpuEnabled);
-void __KernelLoadContext(PSPThreadContext *ctx, bool vfpuEnabled);
+void __KernelLoadContext(const PSPThreadContext *ctx, bool vfpuEnabled);
 
 u32 __KernelResumeThreadFromWait(SceUID threadID, u32 retval); // can return an error value
 u32 __KernelResumeThreadFromWait(SceUID threadID, u64 retval);
@@ -259,9 +258,8 @@ int __KernelRegisterActionType(ActionCreator creator);
 void __KernelRestoreActionType(int actionType, ActionCreator creator);
 
 struct MipsCall {
-	MipsCall()
-	{
-		doAfter = NULL;
+	MipsCall() {
+		doAfter = nullptr;
 	}
 
 	u32 entryPoint;
@@ -326,6 +324,7 @@ struct DebugThreadInfo
 	int stackSize;
 	int priority;
 	WaitType waitType;
+	SceUID waitID;
 	bool isCurrent;
 };
 

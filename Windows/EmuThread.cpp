@@ -4,6 +4,7 @@
 
 #include "Common/System/NativeApp.h"
 #include "Common/System/System.h"
+#include "Common/System/Request.h"
 #include "Common/Data/Text/I18n.h"
 #include "Common/Input/InputState.h"
 #include "Common/Data/Encoding/Utf8.h"
@@ -21,10 +22,16 @@
 #include "Core/Reporting.h"
 #include "Core/MemMap.h"
 #include "Core/Core.h"
-#include "Core/Host.h"
 #include "Core/System.h"
 #include "Core/Config.h"
 #include "Core/ConfigValues.h"
+
+#if PPSSPP_API(ANY_GL)
+#include "Windows/GPU/WindowsGLContext.h"
+#endif
+#include "Windows/GPU/WindowsVulkanContext.h"
+#include "Windows/GPU/D3D9Context.h"
+#include "Windows/GPU/D3D11Context.h"
 
 enum class EmuThreadState {
 	DISABLED,
@@ -68,8 +75,54 @@ bool MainThread_Ready() {
 	return g_inLoop;
 }
 
+static bool Run(GraphicsContext *ctx) {
+	System_Notify(SystemNotification::DISASSEMBLY);
+	while (true) {
+		if (GetUIState() != UISTATE_INGAME) {
+			Core_StateProcessed();
+			if (GetUIState() == UISTATE_EXIT) {
+				// Not sure why we do a final frame here?
+				NativeFrame(ctx);
+				return false;
+			}
+			NativeFrame(ctx);
+			continue;
+		}
+
+		switch (coreState) {
+		case CORE_RUNNING_CPU:
+		case CORE_STEPPING_CPU:
+		case CORE_RUNNING_GE:  // Shouldn't be in this state between frames
+		case CORE_STEPPING_GE:  // This is OK though.
+			// enter a fast runloop
+			NativeFrame(ctx);
+			if (coreState == CORE_POWERDOWN) {
+				return true;
+			}
+			break;
+		case CORE_POWERDOWN:
+			// Need to step the loop.
+			NativeFrame(ctx);
+			return true;
+
+		case CORE_RUNTIME_ERROR:
+			// Need to step the loop.
+			NativeFrame(ctx);
+			break;
+
+		case CORE_POWERUP:
+		case CORE_BOOT_ERROR:
+			// Exit loop!!
+			return true;
+
+		case CORE_NEXTFRAME:
+			return true;
+		}
+	}
+}
+
 static void EmuThreadFunc(GraphicsContext *graphicsContext) {
-	SetCurrentThreadName("Emu");
+	SetCurrentThreadName("EmuThread");
 
 	// There's no real requirement that NativeInit happen on this thread.
 	// We just call the update/render loop here.
@@ -78,11 +131,13 @@ static void EmuThreadFunc(GraphicsContext *graphicsContext) {
 	NativeInitGraphics(graphicsContext);
 
 	while (emuThreadState != (int)EmuThreadState::QUIT_REQUESTED) {
-		// We're here again, so the game quit.  Restart Core_Run() which controls the UI.
+		// We're here again, so the game quit.  Restart Run() which controls the UI.
 		// This way they can load a new game.
 		if (!Core_IsActive())
 			UpdateUIState(UISTATE_MENU);
-		Core_Run(g_graphicsContext);
+		if (!Run(g_graphicsContext)) {
+			emuThreadState = (int)EmuThreadState::QUIT_REQUESTED;
+		}
 	}
 
 	emuThreadState = (int)EmuThreadState::STOPPED;
@@ -99,26 +154,55 @@ static void EmuThreadStart(GraphicsContext *graphicsContext) {
 }
 
 static void EmuThreadStop() {
-	emuThreadState = (int)EmuThreadState::QUIT_REQUESTED;
+	if (emuThreadState != (int)EmuThreadState::QUIT_REQUESTED &&
+		emuThreadState != (int)EmuThreadState::STOPPED) {
+		emuThreadState = (int)EmuThreadState::QUIT_REQUESTED;
+	}
 }
 
 static void EmuThreadJoin() {
 	emuThread.join();
-	emuThread = std::thread();
-	INFO_LOG(SYSTEM, "EmuThreadJoin - joined");
+	INFO_LOG(Log::System, "EmuThreadJoin - joined");
+}
+
+bool CreateGraphicsBackend(std::string *error_message, GraphicsContext **ctx) {
+	WindowsGraphicsContext *graphicsContext = nullptr;
+	switch (g_Config.iGPUBackend) {
+#if PPSSPP_API(ANY_GL)
+	case (int)GPUBackend::OPENGL:
+		graphicsContext = new WindowsGLContext();
+		break;
+#endif
+	case (int)GPUBackend::DIRECT3D9:
+		graphicsContext = new D3D9Context();
+		break;
+	case (int)GPUBackend::DIRECT3D11:
+		graphicsContext = new D3D11Context();
+		break;
+	case (int)GPUBackend::VULKAN:
+		graphicsContext = new WindowsVulkanContext();
+		break;
+	default:
+		return false;
+	}
+
+	if (graphicsContext->Init(MainWindow::GetHInstance(), MainWindow::GetDisplayHWND(), error_message)) {
+		*ctx = graphicsContext;
+		return true;
+	} else {
+		delete graphicsContext;
+		*ctx = nullptr;
+		return false;
+	}
 }
 
 void MainThreadFunc() {
-	if (useEmuThread) {
-		// We'll start up a separate thread we'll call Emu
-		SetCurrentThreadName("Render");
-	} else {
-		// This is both Emu and Render.
-		SetCurrentThreadName("Emu");
-	}
+	// We'll start up a separate thread we'll call Emu
+	SetCurrentThreadName(useEmuThread ? "RenderThread" : "EmuThread");
 
-	host = new WindowsHost(MainWindow::GetHInstance(), MainWindow::GetHWND(), MainWindow::GetDisplayHWND());
-	host->SetWindowTitle(nullptr);
+	SetConsolePosition();
+
+	System_SetWindowTitle("");
 
 	// We convert command line arguments to UTF-8 immediately.
 	std::vector<std::wstring> wideArgs = GetWideCmdLine();
@@ -142,25 +226,25 @@ void MainThreadFunc() {
 	} else if (useEmuThread) {
 		// We must've failed over from OpenGL, flip the emu thread off.
 		useEmuThread = false;
-		SetCurrentThreadName("Emu");
+		SetCurrentThreadName("EmuThread");
 	}
 
 	if (g_Config.sFailedGPUBackends.find("ALL") != std::string::npos) {
 		Reporting::ReportMessage("Graphics init error: %s", "ALL");
 
-		auto err = GetI18NCategory("Error");
+		auto err = GetI18NCategory(I18NCat::ERRORS);
 		const char *defaultErrorAll = "PPSSPP failed to startup with any graphics backend. Try upgrading your graphics and other drivers.";
-		const char *genericError = err->T("GenericAllStartupError", defaultErrorAll);
+		std::string_view genericError = err->T("GenericAllStartupError", defaultErrorAll);
 		std::wstring title = ConvertUTF8ToWString(err->T("GenericGraphicsError", "Graphics Error"));
 		MessageBox(0, ConvertUTF8ToWString(genericError).c_str(), title.c_str(), MB_OK);
 
 		// Let's continue (and probably crash) just so they have a way to keep trying.
 	}
 
-	host->UpdateUI();
+	System_Notify(SystemNotification::UI);
 
 	std::string error_string;
-	bool success = host->InitGraphics(&error_string, &g_graphicsContext);
+	bool success = CreateGraphicsBackend(&error_string, &g_graphicsContext);
 
 	if (success) {
 		// Main thread is the render thread.
@@ -176,13 +260,13 @@ void MainThreadFunc() {
 			W32Util::ExitAndRestart();
 		}
 
-		auto err = GetI18NCategory("Error");
+		auto err = GetI18NCategory(I18NCat::ERRORS);
 		Reporting::ReportMessage("Graphics init error: %s", error_string.c_str());
 
 		const char *defaultErrorVulkan = "Failed initializing graphics. Try upgrading your graphics drivers.\n\nWould you like to try switching to OpenGL?\n\nError message:";
 		const char *defaultErrorOpenGL = "Failed initializing graphics. Try upgrading your graphics drivers.\n\nWould you like to try switching to DirectX 9?\n\nError message:";
 		const char *defaultErrorDirect3D9 = "Failed initializing graphics. Try upgrading your graphics drivers and directx 9 runtime.\n\nWould you like to try switching to OpenGL?\n\nError message:";
-		const char *genericError;
+		std::string_view genericError;
 		GPUBackend nextBackend = GPUBackend::DIRECT3D9;
 		switch (g_Config.iGPUBackend) {
 		case (int)GPUBackend::DIRECT3D9:
@@ -199,10 +283,10 @@ void MainThreadFunc() {
 			genericError = err->T("GenericOpenGLError", defaultErrorOpenGL);
 			break;
 		}
-		std::string full_error = StringFromFormat("%s\n\n%s", genericError, error_string.c_str());
+		std::string full_error = StringFromFormat("%.*s\n\n%s", (int)genericError.size(), genericError.data(), error_string.c_str());
 		std::wstring title = ConvertUTF8ToWString(err->T("GenericGraphicsError", "Graphics Error"));
 		bool yes = IDYES == MessageBox(0, ConvertUTF8ToWString(full_error).c_str(), title.c_str(), MB_ICONERROR | MB_YESNO);
-		ERROR_LOG(BOOT, "%s", full_error.c_str());
+		ERROR_LOG(Log::Boot, "%s", full_error.c_str());
 
 		if (yes) {
 			// Change the config to the alternative and restart.
@@ -215,7 +299,7 @@ void MainThreadFunc() {
 		} else {
 			if (g_Config.iGPUBackend == (int)GPUBackend::DIRECT3D9) {
 				// Allow the user to download the DX9 runtime.
-				LaunchBrowser("https://www.microsoft.com/en-us/download/details.aspx?id=34429");
+				System_LaunchUrl(LaunchUrlType::BROWSER_URL, "https://www.microsoft.com/en-us/download/details.aspx?id=34429");
 			}
 		}
 
@@ -230,10 +314,10 @@ void MainThreadFunc() {
 		NativeResized();
 	}
 
-	DEBUG_LOG(BOOT, "Done.");
+	DEBUG_LOG(Log::Boot, "Done.");
 
 	if (coreState == CORE_POWERDOWN) {
-		INFO_LOG(BOOT, "Exit before core loop.");
+		INFO_LOG(Log::Boot, "Exit before core loop.");
 		goto shutdown;
 	}
 
@@ -247,7 +331,7 @@ void MainThreadFunc() {
 	if (g_Config.bBrowse)
 		PostMessage(MainWindow::GetHWND(), WM_COMMAND, ID_FILE_LOAD, 0);
 
-	Core_EnableStepping(false);
+	Core_Resume();
 
 	if (useEmuThread) {
 		while (emuThreadState != (int)EmuThreadState::DISABLED) {
@@ -257,12 +341,12 @@ void MainThreadFunc() {
 			}
 		}
 	} else {
-		while (GetUIState() != UISTATE_EXIT) {
-			// We're here again, so the game quit.  Restart Core_Run() which controls the UI.
+		while (GetUIState() != UISTATE_EXIT) {  //  && GetUIState() != UISTATE_EXCEPTION
+			// We're here again, so the game quit.  Restart Run() which controls the UI.
 			// This way they can load a new game.
 			if (!Core_IsActive())
 				UpdateUIState(UISTATE_MENU);
-			Core_Run(g_graphicsContext);
+			Run(g_graphicsContext);
 			if (coreState == CORE_BOOT_ERROR) {
 				break;
 			}
@@ -271,9 +355,9 @@ void MainThreadFunc() {
 	Core_Stop();
 	if (!useEmuThread) {
 		// Process the shutdown.  Without this, non-GL delays 800ms on shutdown.
-		Core_Run(g_graphicsContext);
+		Run(g_graphicsContext);
 	}
-	Core_WaitInactive(800);
+	Core_WaitInactive();
 
 	g_inLoop = false;
 
@@ -295,7 +379,11 @@ shutdown:
 	g_graphicsContext->ThreadEnd();
 	g_graphicsContext->ShutdownFromRenderThread();
 
-	// NativeShutdown deletes the graphics context through host->ShutdownGraphics().
+	g_graphicsContext->Shutdown();
+
+	delete g_graphicsContext;
+
+	UpdateConsolePosition();
 	NativeShutdown();
 
 	PostMessage(MainWindow::GetHWND(), MainWindow::WM_USER_UPDATE_UI, 0, 0);

@@ -33,8 +33,10 @@ struct CPUSteppingEvent {
 		j.writeUint("pc", currentMIPS->pc);
 		// A double ought to be good enough for a 156 day debug session.
 		j.writeFloat("ticks", CoreTiming::GetTicks());
-		j.writeString("reason", reason_.reason);
-		j.writeUint("relatedAddress", reason_.relatedAddress);
+		if (reason_.reason) {
+			j.writeString("reason", reason_.reason);
+			j.writeUint("relatedAddress", reason_.relatedAddress);
+		}
 		j.end();
 		return j.str();
 	}
@@ -48,6 +50,8 @@ private:
 // Sent unexpectedly with these properties:
 //  - pc: number value of PC register (inaccurate unless stepping.)
 //  - ticks: number of CPU cycles into emulation.
+//  - reason: a value submitted to Core_EnableStepping ("jit.branchdebug", "savestate.load", "ui.lost_focus", etc.)
+//  - relatedAddress: an address (often zero, but it can be a value of PC saved at some point, a related memory address, etc.)
 
 // CPU has resumed from stepping (cpu.resume)
 //
@@ -56,9 +60,9 @@ void SteppingBroadcaster::Broadcast(net::WebSocketServer *ws) {
 	if (PSP_IsInited()) {
 		int steppingCounter = Core_GetSteppingCounter();
 		// We ignore CORE_POWERDOWN as a stepping state.
-		if (coreState == CORE_STEPPING && steppingCounter != lastCounter_) {
+		if (coreState == CORE_STEPPING_CPU && steppingCounter != lastCounter_) {
 			ws->Send(CPUSteppingEvent(Core_GetSteppingReason()));
-		} else if (prevState_ == CORE_STEPPING && coreState != CORE_STEPPING && Core_IsActive()) {
+		} else if (prevState_ == CORE_STEPPING_CPU && coreState != CORE_STEPPING_CPU && Core_IsActive()) {
 			ws->Send(R"({"event":"cpu.resume"})");
 		}
 		lastCounter_ = steppingCounter;

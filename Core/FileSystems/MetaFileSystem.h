@@ -43,8 +43,9 @@ private:
 	currentDir_t currentDir;
 
 	std::string startingDirectory;
-	std::recursive_mutex lock;  // must be recursive
+	std::recursive_mutex lock;  // must be recursive. TODO: fix that
 
+	// Assumes the lock is held
 	void Reset() {
 		// This used to be 6, probably an attempt to replicate PSP handles.
 		// However, that's an artifact of using psplink anyway...
@@ -57,12 +58,17 @@ public:
 		Reset();
 	}
 
-	void Mount(std::string prefix, std::shared_ptr<IFileSystem> system);
+	void Mount(const std::string &prefix, std::shared_ptr<IFileSystem> system);
 	// Fails if there's not already a file system at prefix.
-	bool Remount(std::string prefix, std::shared_ptr<IFileSystem> system);
+	bool Remount(const std::string &prefix, std::shared_ptr<IFileSystem> system);
 
 	void UnmountAll();
-	void Unmount(std::string prefix);
+	void Unmount(const std::string &prefix);
+
+	// Would like to make this const, but...
+	std::vector<MountPoint> &GetMounts() {
+		return fileSystems;
+	}
 
 	// The pointer returned from these are for temporary usage only. Do not store.
 	IFileSystem *GetSystem(const std::string &prefix);
@@ -91,7 +97,7 @@ public:
 	int MapFilePath(const std::string &inpath, std::string &outpath, MountPoint **system);
 
 	inline int MapFilePath(const std::string &_inpath, std::string &outpath, IFileSystem **system) {
-		MountPoint *mountPoint;
+		MountPoint *mountPoint = nullptr;
 		int error = MapFilePath(_inpath, outpath, &mountPoint);
 		if (error == 0) {
 			*system = mountPoint->system.get();
@@ -125,11 +131,11 @@ public:
 	bool RemoveFile(const std::string &filename) override;
 	int  Ioctl(u32 handle, u32 cmd, u32 indataPtr, u32 inlen, u32 outdataPtr, u32 outlen, int &usec) override;
 	PSPDevType DevType(u32 handle) override;
-	FileSystemFlags Flags() override { return FileSystemFlags::NONE; }
-	u64  FreeSpace(const std::string &path) override;
+	FileSystemFlags Flags() const override { return FileSystemFlags::NONE; }
+	u64  FreeDiskSpace(const std::string &path) override;
 
 	// Convenience helper - returns < 0 on failure.
-	int ReadEntireFile(const std::string &filename, std::vector<u8> &data);
+	int ReadEntireFile(const std::string &filename, std::vector<u8> &data, bool quiet = false);
 
 	void SetStartingDirectory(const std::string &dir) {
 		std::lock_guard<std::recursive_mutex> guard(lock);
@@ -138,16 +144,9 @@ public:
 
 	int64_t ComputeRecursiveDirectorySize(const std::string &dirPath);
 
-	// Shouldn't ever be called, but meh.
-	bool ComputeRecursiveDirSizeIfFast(const std::string &path, int64_t *size) override {
-		int64_t sizeTemp = ComputeRecursiveDirectorySize(path);
-		if (sizeTemp >= 0) {
-			*size = sizeTemp;
-			return true;
-		} else {
-			return false;
-		}
-	}
+	bool ComputeRecursiveDirSizeIfFast(const std::string &path, int64_t *size) override;
+
+	void Describe(char *buf, size_t size) const override { snprintf(buf, size, "Meta"); }
 
 private:
 	int64_t RecursiveSize(const std::string &dirPath);

@@ -10,73 +10,15 @@
 #define ALOGV(...) printf(__VA_ARGS__)
 #endif
 
-//Vulkan
-#ifdef VK_USE_NATIVE_LIB
-#include <vulkan/vulkan.h>
-#else
-#include "Common/GPU/Vulkan/VulkanLoader.h"
-using namespace PPSSPP_VK;
-#endif
+#include "Common/VR/OpenXRLoader.h"
 
-#ifdef ANDROID
-//OpenXR
-#define XR_USE_PLATFORM_ANDROID 1
-#define XR_USE_GRAPHICS_API_OPENGL_ES 1
-#define XR_USE_GRAPHICS_API_VULKAN 1
-#include <EGL/egl.h>
-#include <EGL/eglext.h>
-#include <jni.h>
-#elif defined(_WIN32)
-#include "Common/CommonWindows.h"
-#include <unknwn.h>
-#define XR_USE_PLATFORM_WIN32 1
-#define XR_USE_GRAPHICS_API_OPENGL_ES 1
-#define XR_USE_GRAPHICS_API_VULKAN 1
-#else
-#define XR_USE_GRAPHICS_API_OPENGL_ES 1
-#define XR_USE_GRAPHICS_API_VULKAN 1
-#endif
+#define _USE_MATH_DEFINES
+#include <cmath>
+#include <cassert>
 
-#include <math.h>
-#include <openxr.h>
-#include <openxr_platform.h>
+#if defined(_DEBUG) && (defined(XR_USE_GRAPHICS_API_OPENGL) || defined(XR_USE_GRAPHICS_API_OPENGL_ES))
 
-#ifdef ANDROID
-
-#include <GLES3/gl3.h>
-#include <GLES3/gl3ext.h>
-
-#endif
-
-#if defined(_DEBUG) && defined(ANDROID)
-static const char* GlErrorString(GLenum error) {
-	switch (error) {
-		case GL_NO_ERROR:
-			return "GL_NO_ERROR";
-		case GL_INVALID_ENUM:
-			return "GL_INVALID_ENUM";
-		case GL_INVALID_VALUE:
-			return "GL_INVALID_VALUE";
-		case GL_INVALID_OPERATION:
-			return "GL_INVALID_OPERATION";
-		case GL_INVALID_FRAMEBUFFER_OPERATION:
-			return "GL_INVALID_FRAMEBUFFER_OPERATION";
-		case GL_OUT_OF_MEMORY:
-			return "GL_OUT_OF_MEMORY";
-		default:
-			return "unknown";
-	}
-}
-
-static void GLCheckErrors(char* file, int line) {
-	for (int i = 0; i < 10; i++) {
-		const GLenum error = glGetError();
-		if (error == GL_NO_ERROR) {
-			break;
-		}
-		ALOGE("GL error on line %s:%d %s", file, line, GlErrorString(error));
-	}
-}
+void GLCheckErrors(const char* file, int line);
 
 #define GL(func) func; GLCheckErrors(__FILE__ , __LINE__);
 #else
@@ -100,11 +42,10 @@ static void OXR_CheckErrors(XrInstance instance, XrResult result, const char* fu
 #define OXR(func) func;
 #endif
 
-#ifdef OPENXR_PLATFORM_QUEST
-#define OPENXR_HAS_PERFORMANCE_EXTENSION
-#endif
+#define DECL_PFN(pfn) PFN_##pfn pfn = nullptr
+#define INIT_PFN(pfn) OXR(xrGetInstanceProcAddr(engine->appState.Instance, #pfn, (PFN_xrVoidFunction*)(&pfn)))
 
-enum { ovrMaxLayerCount = 2 };
+enum { ovrMaxLayerCount = 3 };
 enum { ovrMaxNumEyes = 2 };
 
 typedef union {
@@ -124,21 +65,14 @@ typedef struct {
 	uint32_t TextureSwapChainLength;
 	uint32_t TextureSwapChainIndex;
 	ovrSwapChain ColorSwapChain;
-	ovrSwapChain DepthSwapChain;
 	void* ColorSwapChainImage;
-	void* DepthSwapChainImage;
+	unsigned int* GLDepthBuffers;
 	unsigned int* GLFrameBuffers;
-	VkFramebuffer* VKFrameBuffers;
-	VkImageView* VKColorImages;
-	VkImageView* VKDepthImages;
 
 	bool Acquired;
-	bool UseVulkan;
-	XrGraphicsBindingVulkanKHR* VKContext;
 } ovrFramebuffer;
 
 typedef struct {
-	bool Multiview;
 	ovrFramebuffer FrameBuffer[ovrMaxNumEyes];
 } ovrRenderer;
 
@@ -171,31 +105,33 @@ typedef struct {
 	JavaVM* Vm;
 	jobject ActivityObject;
 	JNIEnv* Env;
-	char AppName[64];
-	int AppVersion;
 } ovrJava;
 #endif
 
 typedef struct {
 	uint64_t frameIndex;
 	ovrApp appState;
-#ifdef ANDROID
-	ovrJava java;
-#endif
-	float predictedDisplayTime;
-	bool useVulkan;
-	XrGraphicsBindingVulkanKHR graphicsBindingVulkan;
+	XrTime predictedDisplayTime;
 } engine_t;
 
-#ifdef ANDROID
-void VR_Init( ovrJava java, bool useVulkan );
-#endif
+enum VRPlatformFlag {
+	VR_PLATFORM_CONTROLLER_PICO,
+	VR_PLATFORM_CONTROLLER_QUEST,
+	VR_PLATFORM_EXTENSION_INSTANCE,
+	VR_PLATFORM_EXTENSION_PASSTHROUGH,
+	VR_PLATFORM_EXTENSION_PERFORMANCE,
+	VR_PLATFORM_TRACKING_FLOOR,
+	VR_PLATFORM_MAX
+};
 
+void VR_Init( void* system, const char* name, int version );
 void VR_Destroy( engine_t* engine );
-void VR_EnterVR( engine_t* engine, XrGraphicsBindingVulkanKHR* graphicsBindingVulkan );
+void VR_EnterVR( engine_t* engine );
 void VR_LeaveVR( engine_t* engine );
 
 engine_t* VR_GetEngine( void );
+bool VR_GetPlatformFlag(VRPlatformFlag flag);
+void VR_SetPlatformFLag(VRPlatformFlag flag, bool value);
 
 void ovrApp_Clear(ovrApp* app);
 void ovrApp_Destroy(ovrApp* app);

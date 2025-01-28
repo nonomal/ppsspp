@@ -18,7 +18,6 @@
 #pragma once
 
 #include <vector>
-#include <set>
 #include <map>
 #include <string>
 #include <mutex>
@@ -71,7 +70,7 @@ public:
 	void SortSymbols();
 
 	bool LoadSymbolMap(const Path &filename);
-	void SaveSymbolMap(const Path &filename) const;
+	bool SaveSymbolMap(const Path &filename) const;
 	bool LoadNocashSym(const Path &filename);
 	void SaveNocashSym(const Path &filename) const;
 
@@ -162,6 +161,7 @@ private:
 	// This is indexed by the end address of the module.
 	std::map<u32, const ModuleEntry> activeModuleEnds;
 
+	// Module ID, index
 	typedef std::pair<int, u32> SymbolKey;
 
 	// These are indexed by the module id and relative address in the module.
